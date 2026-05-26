@@ -1,0 +1,32 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff-format
+        name: ruff format
+      - id: ruff
+        name: ruff lint
+        args: [ --fix ]
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy type checking
+        entry: mypy src --strict
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: pytest
+        name: pytest (with coverage JSON generation)
+        entry: pytest --cov=c_linter --cov-report=json
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: update-shields
+        name: update coverage shields in README
+        entry: python scripts/update_shields.py
+        language: system
+        pass_filenames: false
+        always_run: true

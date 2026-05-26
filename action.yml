@@ -1,0 +1,53 @@
+name: 'C Linter'
+description: 'Enforce strict C coding standards via libclang AST parsing'
+author: 'Your Name'
+branding:
+  icon: 'check-circle'
+  color: 'blue'
+
+inputs:
+  files:
+    description: 'Files to lint (supports shell globs like "**/*.c" or space-separated files)'
+    required: false
+    default: '.'
+  no-windows:
+    description: 'Disable Windows format literal #ifdef checks'
+    required: false
+    default: 'false'
+  no-safe-crt:
+    description: 'Disable Safe CRT function replacement checks'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install C Linter
+      shell: bash
+      # github.action_path refers to the directory containing this action.yml
+      run: pip install ${{ github.action_path }}
+
+    - name: Run C Linter
+      shell: bash
+      run: |
+        FLAGS=""
+        if [ "${{ inputs.no-windows }}" == "true" ] || [ "${{ inputs.no-windows }}" == "True" ]; then
+          FLAGS="$FLAGS --no-windows"
+        fi
+        
+        if [ "${{ inputs.no-safe-crt }}" == "true" ] || [ "${{ inputs.no-safe-crt }}" == "True" ]; then
+          FLAGS="$FLAGS --no-safe-crt"
+        fi
+        
+        # If default '.', find all C files. Otherwise, use provided input.
+        if [ "${{ inputs.files }}" == "." ]; then
+          # Use xargs to safely pass found files, or skip if none found
+          find . -type f -name "*.c" | xargs -r c-linter $FLAGS
+        else
+          c-linter ${{ inputs.files }} $FLAGS
+        fi

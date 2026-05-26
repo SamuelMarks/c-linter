@@ -1,0 +1,6 @@
+-   id: c-linter
+    name: C Linter
+    description: Verifies that a C codebase strictly adheres to specific C standards.
+    entry: c-linter
+    language: python
+    types: [c]
