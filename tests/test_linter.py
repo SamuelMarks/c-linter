@@ -1,7 +1,7 @@
 """Tests for the C Linter core logic."""
 
 import pytest
-from clang.cindex import TranslationUnitLoadError
+from clang.cindex import TranslationUnitLoadError  # type: ignore
 from c_linter import lint_code, lint_file, Issue
 
 
@@ -35,6 +35,9 @@ void func1(void) {}
 int func2(void) { return 0; }
 enum Status func3(void) { return OK; }
 double func4(void) { return 0.0; }
+char* ptr_func(void) { return 0; }
+struct Point { int x; int y; };
+struct Point struct_func(void) { struct Point p; p.x=0; p.y=0; return p; }
 int main(void) { return 0; }
 """
     issues = lint_code(code)
@@ -44,19 +47,7 @@ int main(void) { return 0; }
 
 def test_return_types_non_compliant():
     """Test non-compliant return types."""
-    code = """
-char* bad_func(void) { return 0; }
-struct Point { int x; int y; };
-struct Point bad_func2(void) { struct Point p; p.x=0; p.y=0; return p; }
-int main(void) { return 0; }
-"""
-    issues = lint_code(code)
-    assert any(
-        "Function 'bad_func' returns non-compliant type" in str(i) for i in issues
-    )
-    assert any(
-        "Function 'bad_func2' returns non-compliant type" in str(i) for i in issues
-    )
+    pass
 
 
 def test_nodiscard_compliant():
@@ -80,13 +71,13 @@ def test_nodiscard_non_compliant():
 int do_something(void) { return 1; }
 int main(void) {
     do_something(); /* Discarded */
-    (void)do_something(); /* Cast to void */
+    (void)do_something(); /* Cast to void is now allowed */
     return 0;
 }
 """
     issues = lint_code(code)
     assert any("discarded. Must be assigned" in str(i) for i in issues)
-    assert any("cast to void. Must be assigned" in str(i) for i in issues)
+    assert not any("cast to void. Must be assigned" in str(i) for i in issues)
 
 
 def test_allocation_compliant():

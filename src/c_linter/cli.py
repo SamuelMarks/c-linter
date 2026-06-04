@@ -28,6 +28,25 @@ def main() -> None:
         action="store_true",
         help="Disable Safe CRT enforcement (e.g., fopen_s)",
     )
+    parser.add_argument(
+        "-I",
+        "--include",
+        action="append",
+        default=[],
+        help="Add directory to include search path",
+    )
+    parser.add_argument(
+        "--ignore-returns",
+        type=str,
+        default="",
+        help="Comma-separated list of functions or macros to ignore discarded returns for",
+    )
+    parser.add_argument(
+        "--std",
+        type=str,
+        default="c89",
+        help="C standard version (e.g., c89, c99, c11)",
+    )
     args = parser.parse_args()
 
     if not args.files:
@@ -36,6 +55,8 @@ def main() -> None:
 
     print(f"Linting {len(args.files)} file(s)...")
 
+    ignore_returns_list = [x.strip() for x in args.ignore_returns.split(",") if x.strip()]
+
     total_errors = 0
     for f in args.files:
         if not os.path.isfile(f):
@@ -43,7 +64,12 @@ def main() -> None:
             continue
 
         issues = lint_file(
-            f, check_windows=not args.no_windows, check_safe_crt=not args.no_safe_crt
+            f, 
+            check_windows=not args.no_windows, 
+            check_safe_crt=not args.no_safe_crt,
+            includes=args.include,
+            ignore_returns=ignore_returns_list,
+            std=args.std,
         )
         if issues:
             print(f"\nIssues in {f}:")
