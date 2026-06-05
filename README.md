@@ -83,16 +83,49 @@ jobs:
           # no-safe-crt: 'false'
 ```
 
-You can run the linter directly against one or more files:
+You can run the linter directly against one or more files or directories:
 
 ```bash
-c-linter src/main.c src/utils.c
+c-linter src/ include/
 ```
 
 ### CLI Flags
 
 *   `--no-windows`: Disables the Windows format literal guard checks.
 *   `--no-safe-crt`: Disables Safe CRT function replacement checks.
+*   `-I INCLUDE, --include INCLUDE`: Add directory to include search path.
+*   `--ignore-returns IGNORE_RETURNS`: Comma-separated list of functions or macros to ignore discarded returns for.
+*   `--std STD`: C standard version (e.g., c89, c99, c11).
+*   `-p BUILD_DIR, --build-dir BUILD_DIR`: Path to build directory containing `compile_commands.json` (auto-discovered if omitted).
+*   `--exclude EXCLUDE`: Glob pattern to exclude files/directories.
+*   `--no-tolerate-c99`: Do not tolerate C99 type extensions (like `_Bool` or `long long`) in C89 mode.
+*   `--no-header-strategy`: Disable auto-injection of standard headers when linting standalone `.h` files.
+
+### Configuration Files
+
+`c-linter` supports reading its configuration from `pyproject.toml` or a dedicated `.c-linter.toml` file.
+
+**`.c-linter.toml` example:**
+```toml
+std = "c89"
+exclude = ["build/", "vendor/"]
+ignore_returns = ["printf", "fprintf"]
+include = ["include"]
+```
+
+**`pyproject.toml` example:**
+```toml
+[tool.c-linter]
+std = "c99"
+no_safe_crt = true
+```
+
+### Inline Ignore Comments
+
+You can selectively bypass warnings in your source files on a case-by-case basis using special comments:
+
+*   `// NOLINT` or `/* c-linter-disable */`: Ignores linting rules on the current line.
+*   `// NOLINTNEXTLINE`: Ignores linting rules on the following line.
 
 ## Python SDK
 

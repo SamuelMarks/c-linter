@@ -7,7 +7,7 @@ branding:
 
 inputs:
   files:
-    description: 'Files to lint (supports shell globs like "**/*.c" or space-separated files)'
+    description: 'Files or directories to lint (space-separated)'
     required: false
     default: '.'
   no-windows:
@@ -18,6 +18,34 @@ inputs:
     description: 'Disable Safe CRT function replacement checks'
     required: false
     default: 'false'
+  include:
+    description: 'Comma-separated list of include directories (e.g. "include,src/include")'
+    required: false
+    default: ''
+  ignore-returns:
+    description: 'Comma-separated list of functions or macros to ignore discarded returns for'
+    required: false
+    default: ''
+  std:
+    description: 'C standard version (e.g., c89, c99)'
+    required: false
+    default: ''
+  build-dir:
+    description: 'Path to build directory containing compile_commands.json'
+    required: false
+    default: ''
+  exclude:
+    description: 'Comma-separated list of glob patterns to exclude'
+    required: false
+    default: ''
+  no-tolerate-c99:
+    description: 'Do not tolerate C99 type extensions (like _Bool) in C89 mode'
+    required: false
+    default: 'false'
+  no-header-strategy:
+    description: 'Disable auto-injection of standard headers when linting standalone .h files'
+    required: false
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -26,7 +54,7 @@ runs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        
+
     - name: Install C Linter
       shell: bash
       # github.action_path refers to the directory containing this action.yml
@@ -39,15 +67,43 @@ runs:
         if [ "${{ inputs.no-windows }}" == "true" ] || [ "${{ inputs.no-windows }}" == "True" ]; then
           FLAGS="$FLAGS --no-windows"
         fi
-        
+
         if [ "${{ inputs.no-safe-crt }}" == "true" ] || [ "${{ inputs.no-safe-crt }}" == "True" ]; then
           FLAGS="$FLAGS --no-safe-crt"
         fi
-        
-        # If default '.', find all C files. Otherwise, use provided input.
-        if [ "${{ inputs.files }}" == "." ]; then
-          # Use xargs to safely pass found files, or skip if none found
-          find . -type f -name "*.c" | xargs -r c-linter $FLAGS
-        else
-          c-linter ${{ inputs.files }} $FLAGS
+
+        if [ -n "${{ inputs.include }}" ]; then
+          IFS=',' read -ra INCS <<< "${{ inputs.include }}"
+          for i in "${INCS[@]}"; do
+            FLAGS="$FLAGS -I $i"
+          done
         fi
+
+        if [ -n "${{ inputs.ignore-returns }}" ]; then
+          FLAGS="$FLAGS --ignore-returns ${{ inputs.ignore-returns }}"
+        fi
+
+        if [ -n "${{ inputs.std }}" ]; then
+          FLAGS="$FLAGS --std ${{ inputs.std }}"
+        fi
+
+        if [ -n "${{ inputs.build-dir }}" ]; then
+          FLAGS="$FLAGS -p ${{ inputs.build-dir }}"
+        fi
+
+        if [ -n "${{ inputs.exclude }}" ]; then
+          IFS=',' read -ra EXCS <<< "${{ inputs.exclude }}"
+          for e in "${EXCS[@]}"; do
+            FLAGS="$FLAGS --exclude $e"
+          done
+        fi
+
+        if [ "${{ inputs.no-tolerate-c99 }}" == "true" ] || [ "${{ inputs.no-tolerate-c99 }}" == "True" ]; then
+          FLAGS="$FLAGS --no-tolerate-c99"
+        fi
+
+        if [ "${{ inputs.no-header-strategy }}" == "true" ] || [ "${{ inputs.no-header-strategy }}" == "True" ]; then
+          FLAGS="$FLAGS --no-header-strategy"
+        fi
+
+        c-linter ${{ inputs.files }} $FLAGS

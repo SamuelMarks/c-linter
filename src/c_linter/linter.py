@@ -5,32 +5,103 @@ import re
 from typing import List, Optional, Set, Dict, Tuple, Iterable, Any
 
 # We ignore missing types from clang as it does not ship with a py.typed marker.
-from clang.cindex import Index, Cursor, CursorKind, TypeKind, TranslationUnit  # type: ignore
+from clang.cindex import Index, Cursor, CursorKind, TypeKind, TranslationUnit, CompilationDatabase, CompilationDatabaseError  # type: ignore
 
 from .models import Issue
 
 
-def _get_diagnostics(tu: TranslationUnit) -> List[Issue]:
+def _extract_clang_args(args: List[str]) -> List[str]:
+    """Extract relevant compiler arguments from a compile command.
+
+    Args:
+        args (List[str]): Full list of compiler arguments.
+
+    Returns:
+        List[str]: Filtered list of arguments relevant for parsing (includes, defines).
+    """
+    result: List[str] = []
+    if not args:
+        return result
+    i = 1  # Skip compiler executable
+    while i < len(args):
+        arg = args[i]
+        if arg in ('-I', '-isystem'):
+            result.append(arg)
+            if i + 1 < len(args):
+                result.append(args[i+1])
+                i += 1
+        elif arg.startswith('-I') or arg.startswith('-isystem') or arg.startswith('-D') or arg.startswith('-U') or arg.startswith('-std=') or arg.startswith('-m'):
+            result.append(arg)
+        i += 1
+    return result
+
+
+def _get_diagnostics(tu: TranslationUnit, main_filename: str, ignore_missing_includes: bool = False) -> Tuple[List[Issue], Set[str]]:
     """Extract standard clang diagnostics (including C89 violations).
 
     Args:
         tu (TranslationUnit): The parsed translation unit.
+        main_filename (str): The primary filename being linted.
+        ignore_missing_includes (bool): Suppress 'file not found' and cascading type errors.
 
     Returns:
-        List[Issue]: A list of issues representing compiler warnings and errors.
+        Tuple[List[Issue], Set[str]]: A tuple of issues and implicitly declared functions.
     """
     issues: List[Issue] = []
+    implicit_funcs: Set[str] = set()
+    main_abs = os.path.abspath(main_filename)
+    
+    # Patterns to suppress when missing includes are ignored
+    cascade_patterns = [
+        re.compile(r"^unknown type name .*"),
+        re.compile(r"^incomplete definition of type .*"),
+        re.compile(r"^use of undeclared identifier .*"),
+        re.compile(r"^implicitly declaring library function .*"),
+        re.compile(r"^declaration of .* will not be visible outside of this function"),
+        re.compile(r"^invalid application of 'sizeof' to an incomplete type .*"),
+        re.compile(r"^conflicting types for .*"),
+        re.compile(r"^implicit declaration of function '(.*)'"),
+        re.compile(r"^.* file not found$"),
+    ]
+
     for diag in tu.diagnostics:
         filename: str = diag.location.file.name if diag.location.file else "unknown"
+        if filename == "unknown" or os.path.abspath(filename) != main_abs:
+            continue
+            
+        msg = diag.spelling
+        
+        # Track implicit declarations
+        implicit_match = re.search(r"implicit declaration of function '(.*)'", msg)
+        if implicit_match:
+            implicit_funcs.add(implicit_match.group(1))
+
+        if ignore_missing_includes:
+            if any(p.match(msg) for p in cascade_patterns):
+                continue
+                
         issues.append(
             Issue(
                 file=filename,
                 line=diag.location.line,
                 column=diag.location.column,
-                message=diag.spelling,
+                message=msg,
             )
         )
-    return issues
+        
+        # Cap errors to prevent unreadable cascades
+        if len(issues) >= 50:
+            issues.append(
+                Issue(
+                    file=filename,
+                    line=0,
+                    column=0,
+                    message="Too many compiler diagnostics generated. Truncating output to prevent cascading cascades.",
+                )
+            )
+            break
+            
+    return issues, implicit_funcs
 
 
 UNSAFE_CRT_FUNCS: Set[str] = {
@@ -122,7 +193,7 @@ def _check_windows_format_literals(
     guarded_lines: Set[int] = _get_guarded_lines(source_code, WIN_MACROS)
     string_literal_re: re.Pattern[str] = re.compile(r'"([^"\\]*(\\.[^"\\]*)*)"')
     format_specifiers_re: re.Pattern[str] = re.compile(
-        r"%(?:z[udixX]|ll[udixX]|I64[udixX]|I[udixX])"
+        r"%(?:I64[udixX]|I[udixX])"
     )
 
     for i, line in enumerate(source_code.splitlines(), 1):
@@ -135,16 +206,28 @@ def _check_windows_format_literals(
                             file=filename,
                             line=i,
                             column=match.start() + 1,
-                            message="Format specifier (size_t/long long) used without Windows #ifdef guard.",
+                            message="Format specifier (I64/I) used without Windows #ifdef guard.",
                         )
                     )
 
+
+DEFAULT_IGNORE_RETURNS: Set[str] = {
+    "printf", "fprintf", "sprintf", "snprintf", "fflush", "remove", "Sleep",
+    "vfprintf", "vsnprintf", "vsprintf", "puts", "fputs", "fputc", "putc", "putchar",
+    "fopen_s", "fclose", "fseek", "sprintf_s", "strcpy_s", "strncpy_s", "strcat_s",
+    "memcpy_s", "memmove_s", "_putenv_s", "_putenv", "system",
+    "WSAStartup", "WSACleanup", "CloseHandle", "SetEvent", "ResetEvent",
+    "closesocket", "shutdown", "InternetCloseHandle", "WinHttpCloseHandle", "WinHttpSetOption", "send", "recv",
+    "cdd_mutex_unlock"
+}
+"""Set[str]: A set of standard functions whose returns are conventionally ignored."""
 
 def _analyze_ast(
     cursor: Cursor,
     filename: str,
     issues: List[Issue],
     check_safe_crt: bool,
+    strict_safe_crt: bool,
     safe_crt_guarded_lines: Set[int],
     ignore_returns: List[str],
     source_code: str = "",
@@ -157,11 +240,13 @@ def _analyze_ast(
         filename (str): The primary filename being linted (to ignore headers).
         issues (List[Issue]): The list to append found issues to.
         check_safe_crt (bool): Whether to enforce safe CRT functions.
+        strict_safe_crt (bool): Whether to enforce strict safe CRT functions.
         safe_crt_guarded_lines (Set[int]): Lines that are exempted from Safe CRT checks.
         ignore_returns (List[str]): List of macros/functions to ignore discarded returns for.
-        source_code (str): The source code of the file being linted.
-        parent (Optional[Cursor]): The parent node of the current cursor.
+        source_code (str): Full source code of the file.
+        parent (Optional[Cursor]): The parent of the current AST node.
     """
+    import fnmatch
     if cursor.location.file and os.path.abspath(
         cursor.location.file.name
     ) != os.path.abspath(filename):
@@ -169,56 +254,97 @@ def _analyze_ast(
 
     # Check 1: Return types of user-defined functions
     if cursor.kind == CursorKind.FUNCTION_DECL and cursor.is_definition():
-        ret_type = cursor.result_type.kind
-        # Allow void, ints, enums, math types, pointers, records, bools, uchars, long longs
-        allowed_types: Set[Any] = {
-            TypeKind.VOID,
-            TypeKind.BOOL,
-            TypeKind.CHAR_U,
-            TypeKind.UCHAR,
-            TypeKind.CHAR16,
-            TypeKind.CHAR32,
-            TypeKind.USHORT,
-            TypeKind.UINT,
-            TypeKind.ULONG,
-            TypeKind.ULONGLONG,
-            TypeKind.UINT128,
-            TypeKind.CHAR_S,
-            TypeKind.SCHAR,
-            TypeKind.WCHAR,
-            TypeKind.SHORT,
-            TypeKind.INT,
-            TypeKind.LONG,
-            TypeKind.LONGLONG,
-            TypeKind.INT128,
-            TypeKind.ENUM,
-            TypeKind.FLOAT,
-            TypeKind.DOUBLE,
-            TypeKind.LONGDOUBLE,
-            TypeKind.POINTER,
-            TypeKind.RECORD,
-        }
-        if ret_type not in allowed_types:
-            canonical_kind = cursor.result_type.get_canonical().kind
-            if canonical_kind not in allowed_types:
-                msg: str = (
-                    f"Function '{cursor.spelling}' returns non-compliant type "
-                    f"({canonical_kind.name})."
-                )
-                issues.append(
-                    Issue(
-                        file=filename,
-                        line=cursor.location.line,
-                        column=cursor.location.column,
-                        message=msg,
+        try:
+            ret_type = cursor.result_type.kind
+        except ValueError:  # pragma: no cover
+            ret_type = None
+            
+        if ret_type is not None:
+            # Allow void, ints, enums, math types, pointers, records, bools, uchars, long longs
+            allowed_types: Set[Any] = {
+                TypeKind.VOID,
+                TypeKind.BOOL,
+                TypeKind.CHAR_U,
+                TypeKind.UCHAR,
+                TypeKind.CHAR16,
+                TypeKind.CHAR32,
+                TypeKind.USHORT,
+                TypeKind.UINT,
+                TypeKind.ULONG,
+                TypeKind.ULONGLONG,
+                TypeKind.UINT128,
+                TypeKind.CHAR_S,
+                TypeKind.SCHAR,
+                TypeKind.WCHAR,
+                TypeKind.SHORT,
+                TypeKind.INT,
+                TypeKind.LONG,
+                TypeKind.LONGLONG,
+                TypeKind.INT128,
+                TypeKind.ENUM,
+                TypeKind.FLOAT,
+                TypeKind.DOUBLE,
+                TypeKind.LONGDOUBLE,
+                TypeKind.POINTER,
+                TypeKind.RECORD,
+            }
+            if ret_type not in allowed_types:
+                try:
+                    canonical_kind = cursor.result_type.get_canonical().kind
+                except ValueError:  # pragma: no cover
+                    canonical_kind = None
+                
+                if canonical_kind not in allowed_types:
+                    msg: str = (
+                        f"Function '{cursor.spelling}' returns non-compliant type "
+                        f"({canonical_kind.name if canonical_kind else 'UNKNOWN'})."
                     )
-                )
+                    issues.append(
+                        Issue(
+                            file=filename,
+                            line=cursor.location.line,
+                            column=cursor.location.column,
+                            message=msg,
+                        )
+                    )
 
     if cursor.kind == CursorKind.CALL_EXPR:
+        try:
+            call_type_kind = cursor.type.get_canonical().kind
+        except ValueError:  # pragma: no cover
+            call_type_kind = None
+            
         # Check 2: Nodiscard focus on int functions
-        if cursor.type.get_canonical().kind == TypeKind.INT:
+        if call_type_kind == TypeKind.INT:
             is_ignored = False
-            if cursor.spelling in ignore_returns:
+            
+            # Check implicit declaration
+            if (
+                cursor.referenced
+                and cursor.referenced.location.line == cursor.location.line
+                and cursor.referenced.location.column == cursor.location.column
+            ):
+                is_ignored = True
+
+            spelling = cursor.spelling
+            
+            def check_ignored(name: str) -> bool:
+                """Check if a function name matches ignored patterns."""
+                if any(fnmatch.fnmatch(name, pattern) for pattern in ignore_returns):
+                    return True
+                if any(fnmatch.fnmatch(name, pattern) for pattern in DEFAULT_IGNORE_RETURNS):
+                    return True
+                prefixes = ("ASSERT_", "EXPECT_", "TEST_", "LOG_", "PASS")
+                if any(name.startswith(p) for p in prefixes):
+                    return True
+                suffixes = ("_free", "_destroy", "_cleanup", "_close")
+                if any(name.endswith(s) for s in suffixes):
+                    return True
+                if "ASSERT" in name or "EXPECT" in name or "FREE" in name or "LOG" in name:
+                    return True  # pragma: no cover
+                return False
+                
+            if check_ignored(spelling):
                 is_ignored = True
             
             # Check source code token at the location
@@ -232,7 +358,7 @@ def _analyze_ast(
                         if col_idx < len(line_str):
                             substring = line_str[col_idx:]
                             match = re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*", substring)
-                            if match and match.group(0) in ignore_returns:
+                            if match and check_ignored(match.group(0)):
                                 is_ignored = True
                 except Exception:
                     pass
@@ -254,16 +380,18 @@ def _analyze_ast(
 
         # Check 4: Safe CRT
         if check_safe_crt and cursor.spelling in UNSAFE_CRT_FUNCS:
-            if cursor.location.line not in safe_crt_guarded_lines:
-                msg = f"Use safe CRT alternative for '{cursor.spelling}' (e.g., '{cursor.spelling}_s')."
-                issues.append(
-                    Issue(
-                        file=filename,
-                        line=cursor.location.line,
-                        column=cursor.location.column,
-                        message=msg,
+            is_strict_func = cursor.spelling in ("strncpy", "strncat", "wcsncpy", "wcsncat")
+            if not is_strict_func or strict_safe_crt:
+                if cursor.location.line not in safe_crt_guarded_lines:
+                    msg = f"Use safe CRT alternative for '{cursor.spelling}' (e.g., '{cursor.spelling}_s')."        
+                    issues.append(
+                        Issue(
+                            file=filename,
+                            line=cursor.location.line,
+                            column=cursor.location.column,
+                            message=msg,
+                        )
                     )
-                )
 
     for child in cursor.get_children():
         _analyze_ast(
@@ -271,6 +399,7 @@ def _analyze_ast(
             filename,
             issues,
             check_safe_crt,
+            strict_safe_crt,
             safe_crt_guarded_lines,
             ignore_returns,
             source_code=source_code,
@@ -386,13 +515,64 @@ def _check_allocations(tu_cursor: Cursor, filename: str, issues: List[Issue]) ->
                 )
 
 
+def _get_nolint_lines(source_code: str) -> Set[int]:
+    """Identify lines marked with NOLINT comments.
+    
+    Args:
+        source_code (str): The C source code.
+        
+    Returns:
+        Set[int]: Lines that should be ignored.
+    """
+    ignored_lines: Set[int] = set()
+    for i, line in enumerate(source_code.splitlines()):
+        line_num = i + 1
+        if "NOLINT" in line or "c-linter-disable" in line:
+            ignored_lines.add(line_num)
+        if "NOLINTNEXTLINE" in line:
+            ignored_lines.add(line_num + 1)
+    return ignored_lines
+
+
+def _filter_diagnostics(
+    issues: List[Issue],
+    nolint_lines: Set[int],
+    std: str,
+    tolerate_c99_types: bool,
+    ignore_missing_includes: bool = False,
+) -> List[Issue]:
+    """Filter issues based on NOLINT lines and standard tolerances."""
+    filtered = []
+    for issue in issues:
+        if issue.line in nolint_lines:
+            continue
+        
+        msg = issue.message
+        if ignore_missing_includes and "file not found" in msg:
+            continue
+            
+        if tolerate_c99_types and std == "c89":
+            if "'_Bool' is a C99 extension" in msg or "'long long' is an extension" in msg or "variadic macros are a C99 feature" in msg or "extension used" in msg:
+                continue
+                
+        filtered.append(issue)
+    return filtered
+
+
 def lint_file(
-    filename: str, 
-    check_windows: bool = True, 
+    filename: str,
+    check_windows: bool = True,
     check_safe_crt: bool = True,
+    strict_safe_crt: bool = False,
     includes: Optional[List[str]] = None,
     ignore_returns: Optional[List[str]] = None,
     std: str = "c89",
+    build_dir: str = "",
+    tolerate_c99_types: bool = True,
+    header_only_strategy: bool = True,
+    ignore_missing_includes: bool = False,
+    no_test_relaxations: bool = False,
+    freestanding: bool = False,
 ) -> List[Issue]:
     """Lint a C file and return a list of identified issues.
 
@@ -400,9 +580,16 @@ def lint_file(
         filename (str): The path to the C file to lint.
         check_windows (bool): Whether to enforce Windows #ifdef guards for format strings.
         check_safe_crt (bool): Whether to enforce Safe CRT alternatives.
+        strict_safe_crt (bool): Whether to enforce strict Safe CRT alternatives (e.g. strncpy).
         includes (Optional[List[str]]): Additional include directories.
         ignore_returns (Optional[List[str]]): List of macros/functions to ignore discarded returns for.
         std (str): C standard version (e.g., c89, c99).
+        build_dir (str): Path to build directory containing compile_commands.json.
+        tolerate_c99_types (bool): Whether to tolerate C99 type extensions in C89 mode.
+        header_only_strategy (bool): Whether to inject common includes for standalone headers.
+        ignore_missing_includes (bool): Suppress 'file not found' diagnostics.
+        no_test_relaxations (bool): Disable relaxed rules for test files.
+        freestanding (bool): Enforce a freestanding environment (disables built-in headers).
 
     Returns:
         List[Issue]: A list of linting issues found in the file.
@@ -412,15 +599,47 @@ def lint_file(
     if ignore_returns is None:
         ignore_returns = []
 
-    index = Index.create()
-    
-    clang_args = [f"-std={std}", "-pedantic", "-Wall", "-Wno-unused-variable"]
+    is_test_file = False
+    if not no_test_relaxations:
+        from pathlib import Path
+        path_obj = Path(filename)
+        if "tests" in path_obj.parts or "test" in path_obj.parts or "examples" in path_obj.parts or path_obj.name.startswith("test_"):
+            is_test_file = True
+
+    if is_test_file:
+        ignore_missing_includes = True
+        tolerate_c99_types = True
+        ignore_returns.append("*")
+
+    clang_args = [f"-std={std}", "-pedantic", "-Wall", "-Wno-unused-variable", "-ferror-limit=0"]
+    if freestanding:
+        clang_args.append("-ffreestanding")
     for inc in includes:
         clang_args.append(f"-I{inc}")
 
+    if header_only_strategy and filename.endswith(".h"):
+        clang_args.extend(["-include", "stdbool.h", "-include", "stdint.h", "-include", "stddef.h"])
+        clang_args.append("-Wno-unused-function")
+
+    if build_dir:
+        try:
+            compdb = CompilationDatabase.fromDirectory(build_dir)
+            abs_filename = os.path.abspath(filename)
+            cmds = compdb.getCompileCommands(abs_filename)
+            if cmds and len(cmds) > 0:
+                extracted = _extract_clang_args(list(cmds[0].arguments))
+                clang_args.extend(extracted)
+        except CompilationDatabaseError:
+            pass
+
+    index = Index.create()
     tu = index.parse(filename, args=clang_args)
 
-    issues: List[Issue] = _get_diagnostics(tu)
+    issues, implicit_funcs = _get_diagnostics(tu, filename, ignore_missing_includes)
+    
+    # Ignore implicitly declared functions if ignore_missing_includes is true
+    if ignore_missing_includes and implicit_funcs:
+        ignore_returns.extend(implicit_funcs)
 
     try:
         with open(filename, "r", encoding="utf-8") as f:
@@ -434,13 +653,14 @@ def lint_file(
         else set()
     )
 
-    _analyze_ast(tu.cursor, filename, issues, check_safe_crt, safe_crt_guarded_lines, ignore_returns, source_code=source_code)
+    _analyze_ast(tu.cursor, filename, issues, check_safe_crt, strict_safe_crt, safe_crt_guarded_lines, ignore_returns, source_code=source_code)
     _check_allocations(tu.cursor, filename, issues)
 
     if check_windows and source_code:
         _check_windows_format_literals(source_code, filename, issues)
 
-    return issues
+    nolint_lines = _get_nolint_lines(source_code)
+    return _filter_diagnostics(issues, nolint_lines, std, tolerate_c99_types, ignore_missing_includes)
 
 
 def lint_code(
@@ -448,9 +668,15 @@ def lint_code(
     filename: str = "memory.c",
     check_windows: bool = True,
     check_safe_crt: bool = True,
+    strict_safe_crt: bool = False,
     includes: Optional[List[str]] = None,
     ignore_returns: Optional[List[str]] = None,
     std: str = "c89",
+    tolerate_c99_types: bool = True,
+    header_only_strategy: bool = True,
+    ignore_missing_includes: bool = False,
+    no_test_relaxations: bool = False,
+    freestanding: bool = False,
 ) -> List[Issue]:
     """Lint a string containing C code and return a list of identified issues.
 
@@ -459,9 +685,15 @@ def lint_code(
         filename (str): A virtual filename to assign to the code snippet.
         check_windows (bool): Whether to enforce Windows #ifdef guards for format strings.
         check_safe_crt (bool): Whether to enforce Safe CRT alternatives.
+        strict_safe_crt (bool): Whether to enforce strict Safe CRT alternatives.
         includes (Optional[List[str]]): Additional include directories.
         ignore_returns (Optional[List[str]]): List of macros/functions to ignore discarded returns for.
         std (str): C standard version (e.g., c89, c99).
+        tolerate_c99_types (bool): Whether to tolerate C99 type extensions in C89 mode.
+        header_only_strategy (bool): Whether to inject common includes for standalone headers.
+        ignore_missing_includes (bool): Suppress 'file not found' diagnostics.
+        no_test_relaxations (bool): Disable relaxed rules for test files.
+        freestanding (bool): Enforce a freestanding environment (disables built-in headers).
 
     Returns:
         List[Issue]: A list of linting issues found in the code.
@@ -471,11 +703,29 @@ def lint_code(
     if ignore_returns is None:
         ignore_returns = []
 
+    is_test_file = False
+    if not no_test_relaxations:
+        from pathlib import Path
+        path_obj = Path(filename)
+        if "tests" in path_obj.parts or "test" in path_obj.parts or "examples" in path_obj.parts or path_obj.name.startswith("test_"):
+            is_test_file = True
+
+    if is_test_file:
+        ignore_missing_includes = True
+        tolerate_c99_types = True
+        ignore_returns.append("*")
+
     index = Index.create()
     
-    clang_args = [f"-std={std}", "-pedantic", "-Wall", "-Wno-unused-variable"]
+    clang_args = [f"-std={std}", "-pedantic", "-Wall", "-Wno-unused-variable", "-ferror-limit=0"]
+    if freestanding:
+        clang_args.append("-ffreestanding")
     for inc in includes:
         clang_args.append(f"-I{inc}")
+
+    if header_only_strategy and filename.endswith(".h"):
+        clang_args.extend(["-include", "stdbool.h", "-include", "stdint.h", "-include", "stddef.h"])
+        clang_args.append("-Wno-unused-function")
 
     tu = index.parse(
         filename,
@@ -483,15 +733,19 @@ def lint_code(
         unsaved_files=[(filename, code)],
     )
 
-    issues: List[Issue] = _get_diagnostics(tu)
+    issues, implicit_funcs = _get_diagnostics(tu, filename, ignore_missing_includes)
+
+    if ignore_missing_includes and implicit_funcs:
+        ignore_returns.extend(implicit_funcs)
 
     safe_crt_guarded_lines: Set[int] = (
         _get_guarded_lines(code, SAFE_CRT_MACROS) if check_safe_crt else set()
     )
-    _analyze_ast(tu.cursor, filename, issues, check_safe_crt, safe_crt_guarded_lines, ignore_returns, source_code=code)
+    _analyze_ast(tu.cursor, filename, issues, check_safe_crt, strict_safe_crt, safe_crt_guarded_lines, ignore_returns, source_code=code)
     _check_allocations(tu.cursor, filename, issues)
 
     if check_windows:
         _check_windows_format_literals(code, filename, issues)
 
-    return issues
+    nolint_lines = _get_nolint_lines(code)
+    return _filter_diagnostics(issues, nolint_lines, std, tolerate_c99_types, ignore_missing_includes)

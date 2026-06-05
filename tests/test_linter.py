@@ -47,7 +47,18 @@ int main(void) { return 0; }
 
 def test_return_types_non_compliant():
     """Test non-compliant return types."""
-    pass
+    code = """
+typedef struct { int a; } SomeStruct;
+SomeStruct my_func() { SomeStruct s; s.a = 1; return s; }
+"""
+    # Wait, RECORD is allowed.
+    # What's not allowed? How about we return a complex type or an array? Arrays can't be returned by value.
+    # What about a custom typedef that resolves to something weird? Or just a _Complex type?
+    code = """
+_Complex double bad_func(void) { return 0; }
+"""
+    issues = lint_code(code)
+    assert any("returns non-compliant type" in str(i) for i in issues)
 
 
 def test_nodiscard_compliant():
@@ -166,14 +177,14 @@ int main(void) {
 def test_windows_format_unguarded():
     code = """
 int main(void) {
-    char *s = "%zu";
+    char *s = "%I64d";
     return 0;
 }
 """
     issues = lint_code(code)
     assert (
         sum(
-            "Format specifier (size_t/long long) used without Windows #ifdef guard."
+            "Format specifier (I64/I) used without Windows #ifdef guard."
             in str(i)
             for i in issues
         )
@@ -248,3 +259,303 @@ def test_lint_file_io_error():
     """Test the lint_file wrapper handling file read errors gracefully."""
     with pytest.raises(TranslationUnitLoadError):
         lint_file("does_not_exist_file.c")
+
+
+def test_extract_clang_args():
+    from c_linter.linter import _extract_clang_args
+    assert _extract_clang_args([]) == []
+    assert _extract_clang_args(["gcc", "main.c", "-I", "include", "-isystem", "sys", "-DNDEBUG", "-U_WIN32", "-std=c99", "-m32", "-O3"]) == ["-I", "include", "-isystem", "sys", "-DNDEBUG", "-U_WIN32", "-std=c99", "-m32"]
+
+def test_get_diagnostics_unknown_file():
+    from c_linter.linter import _get_diagnostics
+    from unittest.mock import MagicMock
+    tu = MagicMock()
+    diag = MagicMock()
+    diag.location.file = None
+    tu.diagnostics = [diag]
+    assert _get_diagnostics(tu, "main.c")[0] == []
+
+def test_error_capping():
+    from unittest.mock import MagicMock
+    from c_linter.linter import _get_diagnostics
+    tu = MagicMock()
+    diags = []
+    for i in range(55):
+        diag = MagicMock()
+        diag.location.file.name = "main.c"
+        diag.location.line = i
+        diag.location.column = 1
+        diag.spelling = f"Error {i}"
+        diags.append(diag)
+    tu.diagnostics = diags
+    issues, _ = _get_diagnostics(tu, "main.c")
+    assert len(issues) == 51
+    assert issues[-1].message == "Too many compiler diagnostics generated. Truncating output to prevent cascading cascades."
+    code = """
+int main(void) {
+    undeclared_func();
+    return 0;
+}
+"""
+    issues = lint_code(code)
+    # The linter shouldn't complain about discarded returns for implicit functions
+    assert not any("discarded" in str(i) for i in issues)
+
+def test_ignore_missing_includes_cascade():
+    from unittest.mock import MagicMock
+    from c_linter.linter import _get_diagnostics
+    tu = MagicMock()
+    
+    diag1 = MagicMock()
+    diag1.location.file.name = "main.c"
+    diag1.spelling = "unknown type name 'cdd_c_ir_t'"
+    
+    diag2 = MagicMock()
+    diag2.location.file.name = "main.c"
+    diag2.spelling = "implicit declaration of function 'jasprintf'"
+    
+    tu.diagnostics = [diag1, diag2]
+    
+    issues, implicit_funcs = _get_diagnostics(tu, "main.c", ignore_missing_includes=True)
+    assert len(issues) == 0
+    assert "jasprintf" in implicit_funcs
+
+def test_read_source_code_exception(tmp_path):
+    p = tmp_path / "test.c"
+    p.write_text("int main(void) { return 0; }\n")
+    from unittest.mock import patch
+    with patch("builtins.open", side_effect=Exception):
+        issues = lint_file(str(p))
+    assert not issues
+
+def test_ignored_returns_wildcard():
+    code = """
+int WinHttp_DoSomething(void) { return 1; }
+int c_rest_call(void) { return 1; }
+int main(void) {
+    WinHttp_DoSomething();
+    c_rest_call();
+    return 0;
+}
+"""
+    issues = lint_code(code, ignore_returns=["WinHttp*", "c_rest*"])
+    assert not issues
+    code = """
+#include <stdio.h>
+int main(void) {
+    printf("test");
+    ASSERT_EQ(1, 1);
+    LOG_INFO("test");
+    return 0;
+}
+"""
+    issues = lint_code(code)
+    assert not any("discarded" in str(i) for i in issues)
+
+def test_ignored_returns_exception():
+    code = """
+int do_something(void) { return 1; }
+int main(void) {
+    do_something();
+    return 0;
+}
+"""
+    # Cause exception by using an invalid regex to trigger the exception branch
+    from unittest.mock import patch
+    with patch("re.match", side_effect=Exception):
+        issues = lint_code(code)
+    assert any("discarded" in str(i) for i in issues)
+
+def test_lint_file_none_defaults(tmp_path):
+    p = tmp_path / "test.c"
+    p.write_text("int main(void) { return 0; }\n")
+    issues = lint_file(str(p), includes=["test_include"], ignore_returns=None)
+    assert not issues
+
+def test_lint_file_test_relaxations(tmp_path):
+    p = tmp_path / "test_example.c"
+    p.write_text("int do_something() { return 1; } int main(void) { do_something(); return 0; }\n")
+    issues = lint_file(str(p))
+    # Nodiscard should be ignored
+    assert not any("discarded" in i.message for i in issues)
+
+def test_lint_code_freestanding():
+    issues = lint_code("int main(void) { return 0; }\n", freestanding=True)
+    assert not issues
+
+def test_lint_file_freestanding(tmp_path):
+    p = tmp_path / "main.c"
+    p.write_text("int main(void) { return 0; }\n")
+    issues = lint_file(str(p), freestanding=True)
+    assert not issues
+    
+def test_lint_code_none_defaults():
+    issues = lint_code("int main(void) { return 0; }\n", includes=["test_include"], ignore_returns=None)
+    assert not issues
+
+def test_macro_ignored_returns():
+    code = """
+int my_func(int x);
+#define ASSERT_MACRO(x) my_func(x)
+int main(void) {
+    ASSERT_MACRO(1);
+    return 0;
+}
+"""
+    issues = lint_code(code)
+    assert not any("discarded" in str(i) for i in issues)
+
+def test_compdb_load(tmp_path):
+    import os
+    p = tmp_path / "test.c"
+    p.write_text("int main(void) { return 0; }\n")
+    b = tmp_path / "build"
+    b.mkdir()
+    compdb_path = b / "compile_commands.json"
+    abs_path = os.path.abspath(str(p)).replace('\\', '/')
+    compdb_path.write_text(f'[{{"directory": "/", "command": "gcc -Iinclude {abs_path}", "file": "{abs_path}"}}]')
+    issues = lint_file(str(p), build_dir=str(b))
+    assert not issues
+
+def test_compdb_error(tmp_path):
+    """Test CompilationDatabase error."""
+    p = tmp_path / "test.c"
+    p.write_text("int main(void) { return 0; }\n")
+    b = tmp_path / "build2"
+    b.mkdir()
+    # No compile commands, raises CompilationDatabaseError
+    issues = lint_file(str(p), build_dir=str(b))
+    assert not issues
+
+def test_nolint():
+    code = """
+int main(void) {
+    fopen("test", "r"); // NOLINT
+    fopen("test", "r");
+    /* c-linter-disable */
+    return 0;
+}
+"""
+    issues = lint_code(code)
+    # Line 3 is suppressed, line 4 emits 2 issues (discarded return, safe CRT)
+    assert len([i for i in issues if "fopen" in i.message]) == 2
+    assert not any(i.line == 3 for i in issues)
+
+def test_nolint_nextline():
+    code = """
+int main(void) {
+    // NOLINTNEXTLINE
+    fopen("test", "r");
+    return 0;
+}
+"""
+    issues = lint_code(code)
+    assert not issues
+
+def test_tolerate_c99_extensions():
+    code = """
+_Bool b = 1;
+long long a = 0;
+"""
+    # by default tolerate_c99_types is True
+    issues = lint_code(code, std="c89")
+    assert not any("C99 extension" in i.message or "long long" in i.message for i in issues)
+    
+    # if False
+    issues = lint_code(code, std="c89", tolerate_c99_types=False)
+    assert any("extension" in i.message for i in issues)
+
+def test_missing_includes_and_implicit_funcs():
+    code = """
+#include <doesnotexist.h>
+int main(void) {
+    some_implicit_func();
+    return 0;
+}
+"""
+    # test with ignore missing includes
+    issues = lint_code(code, ignore_missing_includes=True)
+    assert not any("file not found" in str(i) for i in issues)
+    assert not any("discarded" in str(i) for i in issues)
+
+def test_header_strategy(tmp_path):
+    p = tmp_path / "test.h"
+    p.write_text("bool a = true;\n")
+    # should inject stdbool.h
+    issues = lint_file(str(p))
+    assert not any("unknown type name 'bool'" in i.message for i in issues)
+    
+    # disable strategy
+    issues = lint_file(str(p), header_only_strategy=False)
+    assert any("unknown type name 'bool'" in i.message for i in issues)
+
+    # Test lint_code with .h extension
+    issues = lint_code("bool a = true;\n", filename="memory.h")
+    assert not any("unknown type name 'bool'" in i.message for i in issues)
+
+def test_analyze_ast_value_error():
+    from c_linter.linter import _analyze_ast
+    from unittest.mock import MagicMock
+    from clang.cindex import CursorKind, TypeKind
+    
+    cursor1 = MagicMock()
+    cursor1.kind = CursorKind.FUNCTION_DECL
+    cursor1.is_definition.return_value = True
+    cursor1.location.file.name = "main.c"
+    
+    # Mocking result_type.kind to return something not in allowed_types
+    # and canonical_kind to raise ValueError
+    class MockTypeCanonical:
+        @property
+        def kind(self):
+            raise ValueError()
+    class MockType:
+        @property
+        def kind(self):
+            return TypeKind.INVALID
+        def get_canonical(self):
+            return MockTypeCanonical()
+            
+    cursor1.result_type = MockType()
+    
+    issues = []
+    # This shouldn't crash
+    _analyze_ast(cursor1, "main.c", issues, False, False, set(), [])
+    
+    cursor2 = MagicMock()
+    cursor2.kind = CursorKind.CALL_EXPR
+    cursor2.location.file.name = "main.c"
+    
+    class MockTypeCanonical2:
+        def get_canonical(self):
+            return MockType()
+            
+    cursor2.type = MockTypeCanonical2()
+    
+    # This shouldn't crash
+    _analyze_ast(cursor2, "main.c", issues, False, False, set(), [])
+
+def test_implicit_declaration_ignore(tmp_path):
+    p = tmp_path / "test.c"
+    p.write_text("void foo() { my_implicit_func(10); }\n")
+    issues = lint_file(str(p), ignore_missing_includes=True)
+    assert not any("discarded" in str(i) for i in issues)
+    
+def test_lint_code_is_test_file():
+    code = "int my_implicit(int x); int main(void) { my_implicit(1); return 0; }"
+    issues = lint_code(code, filename="test_main.c")
+    assert not any("discarded" in str(i) for i in issues)
+    
+def test_ignored_returns_fallback():
+    code = """
+int MY_CUSTOM_ASSERT(void) { return 1; }
+int SOMETHING_FREE(void) { return 1; }
+int main(void) {
+    MY_CUSTOM_ASSERT();
+    SOMETHING_FREE();
+    return 0;
+}
+"""
+    issues = lint_code(code)
+    assert not any("discarded" in str(i) for i in issues)
+

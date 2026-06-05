@@ -73,3 +73,9 @@ venv.bak/
 .idea/
 *.swp
 *.swo
+\
+# Temp Linter logs
+*_lint.txt
+dump_ast*
+compile_commands.json
+coverage.json\
