@@ -3,7 +3,7 @@ C Linter
 
 [![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 ![CI](https://github.com/SamuelMarks/c-linter/actions/workflows/ci.yml/badge.svg)
-![Coverage](https://img.shields.io/badge/Coverage-100%25-brightgreen.svg)
+![Coverage](https://img.shields.io/badge/Coverage-99%25-yellow.svg)
 ![Doc Coverage](https://img.shields.io/badge/Doc_Coverage-100%25-brightgreen.svg)
 ![Typing](https://img.shields.io/badge/Typing-Strict-blue.svg)
 
@@ -21,7 +21,7 @@ Rather than relying on fragile regex matching, this tool actually parses the cod
 3.  **Mandatory Allocation Checking:**
     *   The AST is searched for allocations (`malloc`, `calloc`, `realloc`). Any resulting pointer must be explicitly checked against `NULL` (or `!p`) within the same lexical scope before it is used or returned.
 4.  **Nodiscard Enforcement:**
-    *   Any call to a function that evaluates to an `int` must have its return value evaluated or assigned. It cannot be used in a discarded expression statement, and it cannot be cast to `(void)`.
+    *   Any call to a function that evaluates to an `int` must have its return value evaluated or assigned. It cannot be used in a discarded expression statement, unless explicitly cast to `(void)`.
 5.  **Safe CRT Enforcement:**
     *   Usage of unsafe standard C library functions (like `fopen`, `strcpy`, `sprintf`) are banned. The linter suggests the `_s` alternative (e.g. `fopen_s`).
     *   **Exemption:** You can safely fall back to the unsafe function if it is guarded behind an `#else` block mapping to `#ifdef __STDC_WANT_LIB_EXT1__` or standard Windows macros.
@@ -93,13 +93,21 @@ c-linter src/ include/
 
 *   `--no-windows`: Disables the Windows format literal guard checks.
 *   `--no-safe-crt`: Disables Safe CRT function replacement checks.
-*   `-I INCLUDE, --include INCLUDE`: Add directory to include search path.
+*   `--strict-safe-crt`: Enable strict Safe CRT enforcement (flags strncpy and strncat).
+*   `-I INCLUDE, --include INCLUDE`: Add directory to include search path. (Note: The linter automatically detects and includes `include/` and `src/` directories if they exist in the target path).
 *   `--ignore-returns IGNORE_RETURNS`: Comma-separated list of functions or macros to ignore discarded returns for.
 *   `--std STD`: C standard version (e.g., c89, c99, c11).
 *   `-p BUILD_DIR, --build-dir BUILD_DIR`: Path to build directory containing `compile_commands.json` (auto-discovered if omitted).
+*   `--max-issues-per-file`: Maximum number of compiler diagnostics to report per file (default: 50). Set to 0 to disable.
 *   `--exclude EXCLUDE`: Glob pattern to exclude files/directories.
 *   `--no-tolerate-c99`: Do not tolerate C99 type extensions (like `_Bool` or `long long`) in C89 mode.
 *   `--no-header-strategy`: Disable auto-injection of standard headers when linting standalone `.h` files.
+*   `--ignore-missing-includes`: Suppress 'file not found' diagnostics.
+*   `--no-test-relaxations`: Disable relaxed rules for test files.
+*   `--freestanding`: Enforce a freestanding environment (disables built-in headers).
+*   `--fix`: Automatically fix trivial warnings (e.g., missing newlines at EOF).
+*   `--no-pedantic`: Suppress standard compiler pedantic warnings like 'no newline at end of file'.
+*   `--ignore-formatting`: Alias for `--no-pedantic`.
 
 ### Configuration Files
 
@@ -111,6 +119,7 @@ std = "c89"
 exclude = ["build/", "vendor/"]
 ignore_returns = ["printf", "fprintf"]
 include = ["include"]
+max_issues_per_file = 100
 ```
 
 **`pyproject.toml` example:**
@@ -120,12 +129,29 @@ std = "c99"
 no_safe_crt = true
 ```
 
+### Handling Discarded Returns
+
+If you intentionally want to discard the return value of an integer-returning function, the idiomatic way to bypass the linter without modifying your `--ignore-returns` list is to cast the function call to `(void)`:
+
+```c
+(void)do_something(); /* Return value intentionally discarded */
+```
+
 ### Inline Ignore Comments
 
 You can selectively bypass warnings in your source files on a case-by-case basis using special comments:
 
-*   `// NOLINT` or `/* c-linter-disable */`: Ignores linting rules on the current line.
-*   `// NOLINTNEXTLINE`: Ignores linting rules on the following line.
+*   `// NOLINT` or `/* c-linter-disable */`: Ignores all linting rules on the current line.
+*   `// NOLINTNEXTLINE`: Ignores all linting rules on the following line.
+*   `// NOLINTFILE` or `// c-linter-disable-file`: Ignores all linting rules for the entire file.
+
+#### Scoped Suppressions
+You can also suppress specific rules by providing a comma-separated list of scopes:
+
+*   `// NOLINT(safe-crt)`
+*   `// NOLINT(discarded-return, return-type)`
+*   `// NOLINTNEXTLINE(windows-format)`
+*   `// NOLINT(unchecked-allocation, compiler-diagnostic)`
 
 ## Python SDK
 
@@ -149,18 +175,6 @@ for issue in issues:
 
 # Linting directly from disk (supports the same flags as the CLI)
 file_issues = lint_file("src/main.c", check_windows=True, check_safe_crt=False)
-```
-
-## Pre-commit Integration
-
-To use this linter as a pre-commit hook, add the following to your `.pre-commit-config.yaml`:
-
-```yaml
-repos:
-  - repo: https://github.com/SamuelMarks/c-linter
-    rev: v0.1.0 # Or use a specific commit hash
-    hooks:
-      - id: c-linter
 ```
 
 ## Development

@@ -5,7 +5,34 @@ import sys
 from unittest.mock import patch, mock_open
 
 import pytest
-from c_linter.cli import main, _load_config, _find_compile_commands, _match_exclude, _gather_files
+from c_linter.cli import (
+    main,
+    _load_config,
+    _find_compile_commands,
+    _match_exclude,
+    _gather_files,
+    _gather_include_dirs,
+)
+
+
+def test_gather_include_dirs(tmp_path):
+    """Test gathering include directories."""
+    (tmp_path / "include").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "build").mkdir()
+    (tmp_path / "include" / "test.h").touch()
+    (tmp_path / "src" / "main.c").touch()
+    (tmp_path / "build" / "out.h").touch()
+
+    # Pass the tmp_path itself
+    dirs = _gather_include_dirs([str(tmp_path)], ["build/"])
+    assert len(dirs) == 1
+    assert str(tmp_path / "include") in dirs
+
+    # Pass a specific file
+    dirs = _gather_include_dirs([str(tmp_path / "include" / "test.h")], ["build/"])
+    assert len(dirs) == 1
+    assert str(tmp_path / "include") in dirs
 
 
 def test_cli_no_files(capsys):
@@ -28,7 +55,18 @@ def test_cli_file_not_found(capsys):
         assert "No files provided for linting." in out
 
 
-def test_cli_success(tmp_path, capsys):
+def test_auto_includes(tmp_path, capsys):
+    p = tmp_path / "clean.c"
+    p.write_text("int main(void) {\n    return 0;\n}\n")
+
+    def mock_isdir(path):
+        return path in ("include", "src")
+
+    with patch.object(sys, "argv", ["c-linter", str(p)]):
+        with patch("os.path.isdir", side_effect=mock_isdir):
+            with pytest.raises(SystemExit) as e:
+                main()
+            assert e.value.code == 0
     """Test CLI behavior with a clean C file."""
     p = tmp_path / "clean.c"
     p.write_text("int main(void) {\n    return 0;\n}\n")
@@ -67,7 +105,16 @@ int main(void) {
 }
 """)
     with patch.object(
-        sys, "argv", ["c-linter", str(p), "--no-windows", "--no-safe-crt"]
+        sys,
+        "argv",
+        [
+            "c-linter",
+            str(p),
+            "--no-windows",
+            "--no-safe-crt",
+            "--ignore-returns",
+            "printf",
+        ],
     ):
         with pytest.raises(SystemExit) as e:
             main()
@@ -77,10 +124,7 @@ int main(void) {
             main()
         assert e.value.code == 1
         out, _ = capsys.readouterr()
-        assert (
-            "Format specifier (I64/I) used without Windows #ifdef guard."
-            in out
-        )
+        assert "Format specifier (I64/I) used without Windows #ifdef guard." in out
         assert "Use safe CRT alternative for 'fopen'" in out
 
 
@@ -128,8 +172,10 @@ def test_find_compile_commands(tmp_path):
     with patch("os.path.isfile", return_value=False):
         assert _find_compile_commands() == ""
 
+
 def test_cli_exclude_pattern_asterisks():
     from c_linter.cli import _match_exclude
+
     assert _match_exclude("some/path/file.c", ["some/**"])
     assert _match_exclude("some/path/file.c", ["some**"])
     assert _match_exclude("some/path/file.c", ["path"])
@@ -137,7 +183,7 @@ def test_cli_exclude_pattern_asterisks():
 
     def mock_isfile(path):
         return path == os.path.join("build", "compile_commands.json")
-    
+
     with patch("os.path.isfile", side_effect=mock_isfile):
         assert _find_compile_commands() == "build"
 
@@ -161,7 +207,7 @@ def test_gather_files(tmp_path):
     (tmp_path / "build" / "test.c").touch()
     (tmp_path / "README.md").touch()
     (tmp_path / "excluded_single.c").touch()
-    
+
     # Exclude build dir
     files = _gather_files([str(tmp_path)], ["build/", "excluded_single.c"])
     assert len(files) == 2
@@ -170,7 +216,7 @@ def test_gather_files(tmp_path):
     assert not any("test.c" in f for f in files)
     assert not any("README.md" in f for f in files)
     assert not any("excluded_single.c" in f for f in files)
-    
+
     # Specific file inclusion
     files = _gather_files([str(tmp_path / "src" / "main.c")], [])
     assert len(files) == 1

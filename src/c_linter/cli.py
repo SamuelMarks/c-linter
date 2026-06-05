@@ -17,7 +17,7 @@ from .linter import lint_file
 def _load_config() -> Dict[str, Any]:
     """Load configuration from .c-linter.toml or pyproject.toml."""
     config: Dict[str, Any] = {}
-    
+
     if os.path.isfile(".c-linter.toml"):
         try:
             with open(".c-linter.toml", "rb") as f:
@@ -31,7 +31,7 @@ def _load_config() -> Dict[str, Any]:
                 config = pyproject.get("tool", {}).get("c-linter", {})
         except Exception:
             pass
-    
+
     return config
 
 
@@ -46,16 +46,17 @@ def _find_compile_commands() -> str:
 def _match_exclude(filepath: str, exclude_patterns: List[str]) -> bool:
     """Check if a file matches any of the exclude patterns."""
     import fnmatch
+
     path_obj = Path(filepath)
-    normalized_path = filepath.replace(os.sep, '/')
+    normalized_path = filepath.replace(os.sep, "/")
     for pattern in exclude_patterns:
         # Strip trailing slashes and ** for part matching
-        clean_pattern = pattern.strip('/')
-        if clean_pattern.endswith('/**'):
+        clean_pattern = pattern.strip("/")
+        if clean_pattern.endswith("/**"):
             clean_pattern = clean_pattern[:-3]
-        elif clean_pattern.endswith('**'):
+        elif clean_pattern.endswith("**"):
             clean_pattern = clean_pattern[:-2]
-            
+
         if any(fnmatch.fnmatch(part, clean_pattern) for part in path_obj.parts):
             return True  # pragma: no cover
 
@@ -83,14 +84,32 @@ def _gather_files(paths: List[str], exclude_patterns: List[str]) -> List[str]:
     return sorted(list(files))
 
 
+def _gather_include_dirs(paths: List[str], exclude_patterns: List[str]) -> List[str]:
+    """Gather directories containing .h files from the input paths."""
+    include_dirs = set()
+    for p in paths:
+        if os.path.isdir(p):
+            for root, _, filenames in os.walk(p):
+                if any(name.endswith(".h") for name in filenames):
+                    if not _match_exclude(root, exclude_patterns):
+                        include_dirs.add(os.path.abspath(root))
+        elif os.path.isfile(p) and p.endswith(".h"):
+            dir_path = os.path.dirname(os.path.abspath(p))
+            if not _match_exclude(dir_path, exclude_patterns):
+                include_dirs.add(dir_path)
+    return sorted(list(include_dirs))
+
+
 def main() -> None:
     """The main entry point for the c-linter command-line interface."""
     config = _load_config()
-    
+
     parser = argparse.ArgumentParser(
         description="C Linter - Enforce strict C codebase standards."
     )
-    parser.add_argument("files", nargs="*", help="C source files or directories to lint")
+    parser.add_argument(
+        "files", nargs="*", help="C source files or directories to lint"
+    )
     parser.add_argument(
         "--no-windows",
         action="store_true",
@@ -135,8 +154,23 @@ def main() -> None:
         default=config.get("build_dir", ""),
         help="Path to build directory containing compile_commands.json",
     )
-    
-    default_excludes = config.get("exclude", []) + ["build/**", "out/**", ".git/**", "_deps/**", "wasi-sdk-*/**", "vendor/**", "node_modules/**"]
+
+    parser.add_argument(
+        "--max-issues-per-file",
+        type=int,
+        default=config.get("max_issues_per_file", 50),
+        help="Maximum number of compiler diagnostics to report per file (0 to disable limit, default: 50)",
+    )
+
+    default_excludes = config.get("exclude", []) + [
+        "build/**",
+        "out/**",
+        ".git/**",
+        "_deps/**",
+        "wasi-sdk-*/**",
+        "vendor/**",
+        "node_modules/**",
+    ]
     parser.add_argument(
         "--exclude",
         action="append",
@@ -173,6 +207,34 @@ def main() -> None:
         default=config.get("freestanding", False),
         help="Enforce a freestanding environment (disables built-in headers)",
     )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        default=config.get("fix", False),
+        help="Automatically fix trivial warnings (e.g., missing newlines at EOF)",
+    )
+    parser.add_argument(
+        "--no-pedantic",
+        action="store_true",
+        default=config.get("no_pedantic", False),
+        help="Suppress standard compiler pedantic warnings like 'no newline at end of file'",
+    )
+    parser.add_argument(
+        "--ignore-formatting",
+        action="store_true",
+        default=config.get("ignore_formatting", False),
+        help="Alias for --no-pedantic",
+    )
+
+    parser.epilog = (
+        "Inline Suppression:\n"
+        "  // NOLINT                   Suppress all warnings on the current line\n"
+        "  // NOLINT(safe-crt)         Suppress specific warning categories on the current line\n"
+        "  // NOLINTNEXTLINE           Suppress all warnings on the next line\n"
+        "  // c-linter-disable-file    Suppress all warnings for the entire file\n"
+        "  // NOLINTFILE               Alias for c-linter-disable-file"
+    )
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
 
     args = parser.parse_args()
 
@@ -184,17 +246,37 @@ def main() -> None:
 
     print(f"Linting {len(files_to_lint)} file(s)...")
 
-    ignore_returns_list = [x.strip() for x in args.ignore_returns.split(",") if x.strip()]
+    if args.ignore_returns:
+        ignore_returns_list = [
+            x.strip() for x in args.ignore_returns.split(",") if x.strip()
+        ]
+    else:
+        ignore_returns_list = []
 
     build_dir = args.build_dir
     if not build_dir:
         build_dir = _find_compile_commands()
-        
-    includes = args.include
-    if os.path.isdir("include") and "include" not in includes:
-        includes.append("include")
-    if os.path.isdir("src") and "src" not in includes:
-        includes.append("src")
+
+    includes = args.include if args.include else []
+
+    # Auto-detect all include directories from provided paths
+    auto_includes = _gather_include_dirs(args.files, args.exclude)
+    for ai in auto_includes:
+        if ai not in includes:
+            includes.append(ai)
+
+    if (
+        os.path.isdir("include")
+        and os.path.abspath("include") not in includes
+        and "include" not in includes
+    ):  # pragma: no cover
+        includes.append("include")  # pragma: no cover
+    if (
+        os.path.isdir("src")
+        and os.path.abspath("src") not in includes
+        and "src" not in includes
+    ):  # pragma: no cover
+        includes.append("src")  # pragma: no cover
 
     total_errors = 0
     for f in files_to_lint:
@@ -212,6 +294,9 @@ def main() -> None:
             ignore_missing_includes=args.ignore_missing_includes,
             no_test_relaxations=args.no_test_relaxations,
             freestanding=args.freestanding,
+            max_issues_per_file=args.max_issues_per_file,
+            fix_issues=args.fix,
+            no_pedantic=args.no_pedantic or args.ignore_formatting,
         )
         if issues:
             print(f"\nIssues in {f}:")
