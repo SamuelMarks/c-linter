@@ -26,6 +26,7 @@ def _extract_clang_args(args: List[str]) -> List[str]:
 
     Returns:
         List[str]: Filtered list of arguments relevant for parsing (includes, defines).
+
     """
     result: List[str] = []
     if not args:
@@ -65,9 +66,13 @@ def _get_diagnostics(
         tu (TranslationUnit): The parsed translation unit.
         main_filename (str): The primary filename being linted.
         ignore_missing_includes (bool): Suppress 'file not found' and cascading type errors.
+        max_issues (int): Maximum number of identical diagnostic issues to report.
+        fix_issues (bool): Whether to auto-fix issues (currently unimplemented).
+        no_pedantic (bool): Suppress pedantic compiler warnings.
 
     Returns:
         Tuple[List[Issue], Set[str]]: A tuple of issues and implicitly declared functions.
+
     """
     issues: List[Issue] = []
     implicit_funcs: Set[str] = set()
@@ -213,6 +218,7 @@ def _get_guarded_lines(source_code: str, macros: Tuple[str, ...]) -> Set[int]:
 
     Returns:
         Set[int]: A set of line numbers (1-indexed) that are guarded.
+
     """
     guarded_lines: Set[int] = set()
     guard_depth: int = 0
@@ -243,6 +249,7 @@ def _check_windows_format_literals(
         source_code (str): The C source code to analyze.
         filename (str): The name of the file being linted.
         issues (List[Issue]): The list to append any found issues to.
+
     """
     guarded_lines: Set[int] = _get_guarded_lines(source_code, WIN_MACROS)
     string_literal_re: re.Pattern[str] = re.compile(r'"([^"\\]*(\\.[^"\\]*)*)"')
@@ -336,6 +343,7 @@ def _analyze_ast(
         ignore_returns (List[str]): List of macros/functions to ignore discarded returns for.
         source_code (str): Full source code of the file.
         parent (Optional[Cursor]): The parent of the current AST node.
+
     """
     import fnmatch
 
@@ -518,6 +526,7 @@ def _check_allocations(tu_cursor: Cursor, filename: str, issues: List[Issue]) ->
         tu_cursor (Cursor): The root AST node of the translation unit.
         filename (str): The primary filename being linted.
         issues (List[Issue]): The list to append found issues to.
+
     """
 
     def find_function_decls(cursor: Cursor) -> Iterable[Cursor]:
@@ -528,6 +537,7 @@ def _check_allocations(tu_cursor: Cursor, filename: str, issues: List[Issue]) ->
 
         Yields:
             Cursor: Function declaration cursors.
+
         """
         if cursor.location.file and os.path.abspath(
             cursor.location.file.name
@@ -550,6 +560,7 @@ def _check_allocations(tu_cursor: Cursor, filename: str, issues: List[Issue]) ->
             parent (Optional[Cursor]): The parent of the current AST node.
             allocated_vars (Dict[str, Tuple[int, int]]): Variables that have received allocated memory.
             checked_vars (Set[str]): Variables that have been validated against NULL.
+
         """
         if cursor.kind == CursorKind.CALL_EXPR and cursor.spelling in (
             "malloc",
@@ -575,6 +586,7 @@ def _check_allocations(tu_cursor: Cursor, filename: str, issues: List[Issue]) ->
             Args:
                 c (Cursor): The AST node to check.
                 is_deref (bool): Whether the context is a dereference.
+
             """
             if c.kind == CursorKind.DECL_REF_EXPR:
                 if is_deref:
@@ -659,6 +671,7 @@ def _get_nolint_lines(source_code: str) -> Tuple[Dict[int, Set[str]], bool]:
 
     Returns:
         Tuple[Dict[int, Set[str]], bool]: A tuple containing the dictionary of ignored lines mapping to their scopes, and a boolean indicating if the entire file should be ignored.
+
     """
     ignored_lines: Dict[int, Set[str]] = {}
     ignore_file = False
@@ -780,9 +793,13 @@ def lint_file(
         ignore_missing_includes (bool): Suppress 'file not found' diagnostics.
         no_test_relaxations (bool): Disable relaxed rules for test files.
         freestanding (bool): Enforce a freestanding environment (disables built-in headers).
+        max_issues_per_file (int): Maximum number of identical diagnostic issues to report per file.
+        fix_issues (bool): Whether to auto-fix issues (currently unimplemented).
+        no_pedantic (bool): Suppress pedantic compiler warnings.
 
     Returns:
         List[Issue]: A list of linting issues found in the file.
+
     """
     if includes is None:
         includes = []
@@ -943,9 +960,13 @@ def lint_code(
         ignore_missing_includes (bool): Suppress 'file not found' diagnostics.
         no_test_relaxations (bool): Disable relaxed rules for test files.
         freestanding (bool): Enforce a freestanding environment (disables built-in headers).
+        max_issues_per_file (int): Maximum number of identical diagnostic issues to report per file.
+        fix_issues (bool): Whether to auto-fix issues (currently unimplemented).
+        no_pedantic (bool): Suppress pedantic compiler warnings.
 
     Returns:
         List[Issue]: A list of linting issues found in the code.
+
     """
     if includes is None:
         includes = []

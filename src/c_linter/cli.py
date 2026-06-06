@@ -117,7 +117,7 @@ def _gather_include_dirs(paths: List[str], exclude_patterns: List[str]) -> List[
 
 
 def main() -> None:
-    """The main entry point for the c-linter command-line interface."""
+    """Execute the main entry point for the c-linter command-line interface."""
     config = _load_config()
 
     parser = argparse.ArgumentParser(

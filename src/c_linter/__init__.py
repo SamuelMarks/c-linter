@@ -9,6 +9,7 @@ Example:
     >>> issues = lint_code("int main() { return 0; }")
     >>> for issue in issues:
     ...     print(issue)
+
 """
 
 from .linter import lint_code, lint_file

@@ -12,6 +12,7 @@ class Issue:
         line (int): The line number where the issue was found (1-indexed).
         column (int): The column number where the issue was found (1-indexed).
         message (str): A descriptive message explaining the linting rule violation.
+
     """
 
     file: str
@@ -25,6 +26,7 @@ class Issue:
 
         Returns:
             str: The formatted issue string in the form "file:line:column: message".
+
         """
         prefix = "[FIXED] " if self.fixed else ""
         return f"{prefix}{self.file}:{self.line}:{self.column}: {self.message}"
