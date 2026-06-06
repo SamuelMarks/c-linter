@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 if sys.version_info >= (3, 11):
-    import tomllib
+    import tomllib  # type: ignore[import-not-found,unused-ignore] # pragma: no cover
 else:  # pragma: no cover
-    import tomli as tomllib  # pragma: no cover
+    import tomli as tomllib  # type: ignore[import-not-found,unused-ignore] # pragma: no cover
 
 from .linter import lint_file
 
