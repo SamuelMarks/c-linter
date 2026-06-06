@@ -5,7 +5,7 @@ import re
 from typing import List, Optional, Set, Dict, Tuple, Iterable, Any
 
 # We ignore missing types from clang as it does not ship with a py.typed marker.
-from clang.cindex import (
+from clang.cindex import (  # type: ignore
     Index,
     Cursor,
     CursorKind,
@@ -13,7 +13,7 @@ from clang.cindex import (
     TranslationUnit,
     CompilationDatabase,
     CompilationDatabaseError,
-)  # type: ignore
+)
 
 from .models import Issue
 
@@ -87,6 +87,9 @@ def _get_diagnostics(
         re.compile(r"^.* file not found$"),
     ]
 
+    has_missing_include = False
+    message_counts: Dict[str, int] = {}
+
     for diag in tu.diagnostics:
         filename: str = diag.location.file.name if diag.location.file else "unknown"
         if filename == "unknown" or os.path.abspath(filename) != main_abs:
@@ -94,24 +97,41 @@ def _get_diagnostics(
 
         msg = diag.spelling
 
+        message_counts[msg] = message_counts.get(msg, 0) + 1
+        if message_counts[msg] > 5:
+            continue
+
+        if msg.endswith("file not found"):
+            has_missing_include = True
+
         if msg == "no newline at end of file":
             if fix_issues:
                 try:
                     with open(filename, "a", encoding="utf-8") as f:
                         f.write("\n")
+                    issues.append(
+                        Issue(
+                            file=filename,
+                            line=diag.location.line,
+                            column=diag.location.column,
+                            message=msg,
+                            fixed=True,
+                        )
+                    )
                     continue
                 except Exception:
                     pass
-            elif no_pedantic:
-                continue
 
         # Track implicit declarations
         implicit_match = re.search(r"implicit declaration of function '(.*)'", msg)
         if implicit_match:
             implicit_funcs.add(implicit_match.group(1))
 
-        if ignore_missing_includes:
-            if any(p.match(msg) for p in cascade_patterns):
+        if ignore_missing_includes or has_missing_include:
+            # We don't skip the "file not found" message itself unless ignore_missing_includes is True
+            if msg.endswith("file not found") and not ignore_missing_includes:
+                pass
+            elif any(p.match(msg) for p in cascade_patterns):
                 continue
 
         issues.append(
@@ -619,7 +639,6 @@ def _check_allocations(tu_cursor: Cursor, filename: str, issues: List[Issue]) ->
         allocated_vars: Dict[str, Tuple[int, int]] = {}
         checked_vars: Set[str] = set()
         walk_allocs_and_checks(func, None, allocated_vars, checked_vars)
-        print(f"Allocated: {allocated_vars}, Checked: {checked_vars}")
         for var, (line, col) in allocated_vars.items():
             if var not in checked_vars:
                 issues.append(
@@ -792,24 +811,37 @@ def lint_file(
 
     clang_args = [
         f"-std={std}",
-        "-pedantic",
-        "-Wall",
         "-Wno-unused-variable",
+        "-Wno-unknown-pragmas",
+        "-D_CRT_SECURE_NO_WARNINGS",
         "-ferror-limit=0",
     ]
+    if not no_pedantic:
+        clang_args.extend(["-pedantic", "-Wall"])
     if freestanding:
         clang_args.append("-ffreestanding")
     for inc in includes:
         clang_args.append(f"-I{inc}")
 
     if header_only_strategy and filename.endswith(".h"):
-        base_name = os.path.basename(filename).lower()
-        if not base_name.endswith("stdbool.h"):
-            clang_args.extend(["-include", "stdbool.h"])
-        if not base_name.endswith("stdint.h"):
-            clang_args.extend(["-include", "stdint.h"])
-        if not base_name.endswith("stddef.h"):
-            clang_args.extend(["-include", "stddef.h"])
+        types = [
+            "uint8_t=unsigned char",
+            "uint16_t=unsigned short",
+            "uint32_t=unsigned int",
+            "uint64_t=unsigned long long",
+            "int8_t=signed char",
+            "int16_t=signed short",
+            "int32_t=signed int",
+            "int64_t=signed long long",
+            "size_t=unsigned long",
+            "ssize_t=long",
+            "bool=_Bool",
+            "true=1",
+            "false=0",
+            "NULL=0",
+        ]
+        for t in types:
+            clang_args.append(f"-D{t}")
         clang_args.append("-Wno-unused-function")
 
     if build_dir:
@@ -944,24 +976,37 @@ def lint_code(
 
     clang_args = [
         f"-std={std}",
-        "-pedantic",
-        "-Wall",
         "-Wno-unused-variable",
+        "-Wno-unknown-pragmas",
+        "-D_CRT_SECURE_NO_WARNINGS",
         "-ferror-limit=0",
     ]
+    if not no_pedantic:
+        clang_args.extend(["-pedantic", "-Wall"])
     if freestanding:
         clang_args.append("-ffreestanding")
     for inc in includes:
         clang_args.append(f"-I{inc}")
 
     if header_only_strategy and filename.endswith(".h"):
-        base_name = os.path.basename(filename).lower()
-        if not base_name.endswith("stdbool.h"):
-            clang_args.extend(["-include", "stdbool.h"])
-        if not base_name.endswith("stdint.h"):
-            clang_args.extend(["-include", "stdint.h"])
-        if not base_name.endswith("stddef.h"):
-            clang_args.extend(["-include", "stddef.h"])
+        types = [
+            "uint8_t=unsigned char",
+            "uint16_t=unsigned short",
+            "uint32_t=unsigned int",
+            "uint64_t=unsigned long long",
+            "int8_t=signed char",
+            "int16_t=signed short",
+            "int32_t=signed int",
+            "int64_t=signed long long",
+            "size_t=unsigned long",
+            "ssize_t=long",
+            "bool=_Bool",
+            "true=1",
+            "false=0",
+            "NULL=0",
+        ]
+        for t in types:
+            clang_args.append(f"-D{t}")
         clang_args.append("-Wno-unused-function")
 
     tu = index.parse(

@@ -174,6 +174,7 @@ def test_find_compile_commands(tmp_path):
     with patch("os.path.isfile", return_value=False):
         assert _find_compile_commands([]) == ""
 
+
 def test_cli_exclude_pattern_asterisks():
     from c_linter.cli import _match_exclude
 
@@ -231,17 +232,23 @@ def test_gather_files(tmp_path):
     files = _gather_files([str(tmp_path / "does_not_exist.c")], [])
     assert len(files) == 0
 
+
 def test_find_compile_commands_relative(tmp_path):
     (tmp_path / "build").mkdir()
     (tmp_path / "build" / "compile_commands.json").touch()
-    assert _find_compile_commands([str(tmp_path / "src" / "file.c")]) == str(tmp_path / "build")
+    assert _find_compile_commands([str(tmp_path / "src" / "file.c")]) == str(
+        tmp_path / "build"
+    )
+
 
 def test_cli_no_discarded_returns_and_safe_crt_exclude(tmp_path, capsys):
     p = tmp_path / "bad.c"
-    p.write_text("#include <string.h>\n#include <stdio.h>\nint main(void) { char b[10]; strcpy(b, \"\"); printf(\"test\"); return 0; }\n")
+    p.write_text(
+        '#include <string.h>\n#include <stdio.h>\nint main(void) { char b[10]; strcpy(b, ""); printf("test"); return 0; }\n'
+    )
     (tmp_path / "include").mkdir()
     (tmp_path / "include" / "test.h").touch()
-    
+
     with patch.object(
         sys,
         "argv",

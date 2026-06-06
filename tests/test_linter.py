@@ -731,13 +731,16 @@ def test_diagnostic_limit_and_grouping():
     counts = sum(1 for i in issues if "unknown type name" in i.message)
     assert counts <= 5
 
+
 def test_fix_issues_exception(tmp_path):
     from unittest.mock import patch
+
     p = tmp_path / "nonewline.c"
     p.write_text("int main(void) { return 0; }", encoding="utf-8")
     with patch("builtins.open", side_effect=Exception("Failed to open")):
         issues = lint_file(str(p), fix_issues=True)
     assert any("no newline at end of file" in str(i) for i in issues)
+
 
 def test_no_pedantic_flag(tmp_path):
     p = tmp_path / "nonewline.c"
@@ -745,16 +748,23 @@ def test_no_pedantic_flag(tmp_path):
     issues = lint_file(str(p), no_pedantic=True)
     assert not any("no newline at end of file" in str(i) for i in issues)
 
+
 def test_has_missing_include_pass():
     code = "#include <nonexistent.h>\nint main(void) { return 0; }"
     issues = lint_code(code, ignore_missing_includes=False)
     assert any("file not found" in str(i) for i in issues)
+
 
 def test_ignore_returns_suffixes():
     code = "int my_free(void) { return 1; } int main(void) { my_free(); return 0; }"
     issues = lint_code(code)
     assert not any("discarded. Must be assigned" in str(i) for i in issues)
 
+
 def test_unchecked_allocation_msg():
     from c_linter.linter import _get_issue_scope
-    assert _get_issue_scope("allocation assigned to 'x' is not checked") == "unchecked-allocation"
+
+    assert (
+        _get_issue_scope("allocation assigned to 'x' is not checked")
+        == "unchecked-allocation"
+    )

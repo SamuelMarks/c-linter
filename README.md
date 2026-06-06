@@ -3,7 +3,7 @@ C Linter
 
 [![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 ![CI](https://github.com/SamuelMarks/c-linter/actions/workflows/ci.yml/badge.svg)
-![Coverage](https://img.shields.io/badge/Coverage-99%25-yellow.svg)
+![Coverage](https://img.shields.io/badge/Coverage-100%25-brightgreen.svg)
 ![Doc Coverage](https://img.shields.io/badge/Doc_Coverage-100%25-brightgreen.svg)
 ![Typing](https://img.shields.io/badge/Typing-Strict-blue.svg)
 

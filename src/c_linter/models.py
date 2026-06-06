@@ -18,6 +18,7 @@ class Issue:
     line: int
     column: int
     message: str
+    fixed: bool = False
 
     def __str__(self) -> str:
         """Format the issue as a standard compiler-like diagnostic string.
@@ -25,4 +26,5 @@ class Issue:
         Returns:
             str: The formatted issue string in the form "file:line:column: message".
         """
-        return f"{self.file}:{self.line}:{self.column}: {self.message}"
+        prefix = "[FIXED] " if self.fixed else ""
+        return f"{prefix}{self.file}:{self.line}:{self.column}: {self.message}"

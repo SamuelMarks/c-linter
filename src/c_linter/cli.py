@@ -40,9 +40,13 @@ def _find_compile_commands(search_paths: List[str]) -> str:
     for d in [".", "build", "out"]:
         if os.path.isfile(os.path.join(d, "compile_commands.json")):
             return d
-            
+
     for p in search_paths:
-        base = os.path.abspath(p) if os.path.isdir(p) else os.path.dirname(os.path.abspath(p))
+        base = (
+            os.path.abspath(p)
+            if os.path.isdir(p)
+            else os.path.dirname(os.path.abspath(p))
+        )
         while True:
             for d in [base, os.path.join(base, "build"), os.path.join(base, "out")]:
                 if os.path.isfile(os.path.join(d, "compile_commands.json")):
@@ -119,7 +123,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="C Linter - Enforce strict C codebase standards."
     )
-    
+
     # Core positional argument
     parser.add_argument(
         "files", nargs="*", help="C source files or directories to lint"
