@@ -100,7 +100,7 @@ int main(void) {
     if (!p) return 1;
     
     void *q = calloc(1, 10);
-    if (q == NULL) return 1;
+    if (q == p) return 1;
 
     void *r = realloc(p, 20);
     if (NULL != r) { }
