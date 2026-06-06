@@ -109,7 +109,7 @@ int main(void) {
 }
 """
     issues = lint_code(code)
-    assert [i for i in issues if "Potential failure from allocation" in str(i)] == []
+    assert not any("Potential failure from allocation" in str(i) for i in issues)
 
 
 def test_deref_before_check():

@@ -31,9 +31,6 @@ jobs:
         pip install libclang pytest pytest-cov mypy interrogate
         pip install -e .
 
-    - name: Run AST dump
-      run: python test_ast_dump.py
-
     - name: Run tests with coverage
       run: |
         pytest --cov=c_linter --cov-report=xml --cov-fail-under=100

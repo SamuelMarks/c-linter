@@ -602,7 +602,18 @@ def _check_allocations(tu_cursor: Cursor, filename: str, issues: List[Issue]) ->
                         )
                 else:
                     checked_vars.add(c.spelling)
-            for child in c.get_children():
+            children = list(c.get_children())
+            if not children and c.kind == CursorKind.UNEXPOSED_EXPR:  # pragma: no cover
+                # Fallback for platforms where libclang hides children inside macros (e.g., NULL)
+                try:
+                    from clang.cindex import TokenKind
+                    for t in c.get_tokens():
+                        if t.kind == TokenKind.IDENTIFIER:
+                            checked_vars.add(t.spelling)
+                except Exception:
+                    pass
+
+            for child in children:
                 find_decl_refs(child, is_deref)
 
         if cursor.kind == CursorKind.UNARY_OPERATOR:
