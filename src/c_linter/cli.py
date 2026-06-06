@@ -35,11 +35,23 @@ def _load_config() -> Dict[str, Any]:
     return config
 
 
-def _find_compile_commands() -> str:
+def _find_compile_commands(search_paths: List[str]) -> str:
     """Auto-discover compile_commands.json."""
     for d in [".", "build", "out"]:
         if os.path.isfile(os.path.join(d, "compile_commands.json")):
             return d
+            
+    for p in search_paths:
+        base = os.path.abspath(p) if os.path.isdir(p) else os.path.dirname(os.path.abspath(p))
+        while True:
+            for d in [base, os.path.join(base, "build"), os.path.join(base, "out")]:
+                if os.path.isfile(os.path.join(d, "compile_commands.json")):
+                    return d
+            parent = os.path.dirname(base)
+            if parent == base:
+                break
+            base = parent
+
     return ""
 
 
@@ -107,61 +119,88 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="C Linter - Enforce strict C codebase standards."
     )
+    
+    # Core positional argument
     parser.add_argument(
         "files", nargs="*", help="C source files or directories to lint"
     )
-    parser.add_argument(
+
+    # 1. Rules & Enforcement
+    rules_group = parser.add_argument_group("Rule Configuration")
+    rules_group.add_argument(
+        "--std",
+        type=str,
+        default=config.get("std", "c89"),
+        help="C standard version (e.g., c89, c99, c11)",
+    )
+    rules_group.add_argument(
         "--no-windows",
         action="store_true",
         default=config.get("no_windows", False),
         help="Disable Windows format literal #ifdef checks",
     )
-    parser.add_argument(
+    rules_group.add_argument(
         "--no-safe-crt",
         action="store_true",
         default=config.get("no_safe_crt", False),
         help="Disable Safe CRT enforcement (e.g., fopen_s)",
     )
-    parser.add_argument(
+    rules_group.add_argument(
         "--strict-safe-crt",
         action="store_true",
         default=config.get("strict_safe_crt", False),
         help="Enable strict Safe CRT enforcement (flags strncpy and strncat)",
     )
-    parser.add_argument(
+    rules_group.add_argument(
+        "--no-discarded-returns",
+        action="store_true",
+        default=config.get("no_discarded_returns", False),
+        help="Disable the discarded return value check globally",
+    )
+    rules_group.add_argument(
+        "--no-tolerate-c99",
+        action="store_true",
+        default=config.get("no_tolerate_c99", False),
+        help="Do not tolerate C99 type extensions (like _Bool or long long) in C89 mode",
+    )
+    rules_group.add_argument(
+        "--no-test-relaxations",
+        action="store_true",
+        default=config.get("no_test_relaxations", False),
+        help="Disable relaxed rules for test files",
+    )
+    rules_group.add_argument(
+        "--freestanding",
+        action="store_true",
+        default=config.get("freestanding", False),
+        help="Enforce a freestanding environment (disables built-in headers)",
+    )
+
+    # 2. Build & Environment
+    build_group = parser.add_argument_group("Build & Environment")
+    build_group.add_argument(
         "-I",
         "--include",
         action="append",
         default=config.get("include", []),
         help="Add directory to include search path",
     )
-    parser.add_argument(
-        "--ignore-returns",
-        type=str,
-        default=",".join(config.get("ignore_returns", [])),
-        help="Comma-separated list of functions or macros to ignore discarded returns for",
-    )
-    parser.add_argument(
-        "--std",
-        type=str,
-        default=config.get("std", "c89"),
-        help="C standard version (e.g., c89, c99, c11)",
-    )
-    parser.add_argument(
+    build_group.add_argument(
         "-p",
         "--build-dir",
         type=str,
         default=config.get("build_dir", ""),
         help="Path to build directory containing compile_commands.json",
     )
-
-    parser.add_argument(
-        "--max-issues-per-file",
-        type=int,
-        default=config.get("max_issues_per_file", 50),
-        help="Maximum number of compiler diagnostics to report per file (0 to disable limit, default: 50)",
+    build_group.add_argument(
+        "--no-header-strategy",
+        action="store_true",
+        default=config.get("no_header_strategy", False),
+        help="Disable auto-injection of standard headers when linting standalone .h files",
     )
 
+    # 3. Exclusions & Suppressions
+    exc_group = parser.add_argument_group("Exclusions & Suppressions")
     default_excludes = config.get("exclude", []) + [
         "build/**",
         "out/**",
@@ -171,59 +210,56 @@ def main() -> None:
         "vendor/**",
         "node_modules/**",
     ]
-    parser.add_argument(
+    exc_group.add_argument(
         "--exclude",
         action="append",
         default=default_excludes,
         help="Glob pattern to exclude files/directories",
     )
-    parser.add_argument(
-        "--no-tolerate-c99",
-        action="store_true",
-        default=config.get("no_tolerate_c99", False),
-        help="Do not tolerate C99 type extensions (like _Bool or long long) in C89 mode",
+    exc_group.add_argument(
+        "--safe-crt-exclude",
+        action="append",
+        default=config.get("safe_crt_exclude", []),
+        help="Glob pattern to exclude files/directories from Safe CRT checks",
     )
-    parser.add_argument(
-        "--no-header-strategy",
-        action="store_true",
-        default=config.get("no_header_strategy", False),
-        help="Disable auto-injection of standard headers when linting standalone .h files",
+    exc_group.add_argument(
+        "--ignore-returns",
+        type=str,
+        default=",".join(config.get("ignore_returns", [])),
+        help="Comma-separated list of functions or macros to ignore discarded returns for",
     )
-    parser.add_argument(
+    exc_group.add_argument(
         "--ignore-missing-includes",
         action="store_true",
         default=config.get("ignore_missing_includes", False),
         help="Suppress 'file not found' diagnostics",
     )
-    parser.add_argument(
-        "--no-test-relaxations",
-        action="store_true",
-        default=config.get("no_test_relaxations", False),
-        help="Disable relaxed rules for test files",
-    )
-    parser.add_argument(
-        "--freestanding",
-        action="store_true",
-        default=config.get("freestanding", False),
-        help="Enforce a freestanding environment (disables built-in headers)",
-    )
-    parser.add_argument(
-        "--fix",
-        action="store_true",
-        default=config.get("fix", False),
-        help="Automatically fix trivial warnings (e.g., missing newlines at EOF)",
-    )
-    parser.add_argument(
+    exc_group.add_argument(
         "--no-pedantic",
         action="store_true",
         default=config.get("no_pedantic", False),
         help="Suppress standard compiler pedantic warnings like 'no newline at end of file'",
     )
-    parser.add_argument(
+    exc_group.add_argument(
         "--ignore-formatting",
         action="store_true",
         default=config.get("ignore_formatting", False),
         help="Alias for --no-pedantic",
+    )
+
+    # 4. Output & Formatting
+    out_group = parser.add_argument_group("Output & Actions")
+    out_group.add_argument(
+        "--max-issues-per-file",
+        type=int,
+        default=config.get("max_issues_per_file", 50),
+        help="Maximum number of compiler diagnostics to report per file (0 to disable limit, default: 50)",
+    )
+    out_group.add_argument(
+        "--fix",
+        action="store_true",
+        default=config.get("fix", False),
+        help="Automatically fix trivial warnings (e.g., missing newlines at EOF)",
     )
 
     parser.epilog = (
@@ -253,9 +289,12 @@ def main() -> None:
     else:
         ignore_returns_list = []
 
+    if args.no_discarded_returns:
+        ignore_returns_list.append("*")
+
     build_dir = args.build_dir
     if not build_dir:
-        build_dir = _find_compile_commands()
+        build_dir = _find_compile_commands(args.files)
 
     includes = args.include if args.include else []
 
@@ -280,10 +319,14 @@ def main() -> None:
 
     total_errors = 0
     for f in files_to_lint:
+        file_check_safe_crt = not args.no_safe_crt
+        if file_check_safe_crt and _match_exclude(f, args.safe_crt_exclude):
+            file_check_safe_crt = False
+
         issues = lint_file(
             f,
             check_windows=not args.no_windows,
-            check_safe_crt=not args.no_safe_crt,
+            check_safe_crt=file_check_safe_crt,
             strict_safe_crt=args.strict_safe_crt,
             includes=includes,
             ignore_returns=ignore_returns_list,
@@ -302,7 +345,8 @@ def main() -> None:
             print(f"\nIssues in {f}:")
             for issue in issues:
                 print(f"  {issue}")  # pragma: no cover
-            total_errors += len(issues)
+                if not getattr(issue, "fixed", False):
+                    total_errors += 1
 
     if total_errors > 0:
         print(f"\nLinting failed with {total_errors} issue(s).")

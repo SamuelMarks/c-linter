@@ -7,26 +7,123 @@ C Linter
 ![Doc Coverage](https://img.shields.io/badge/Doc_Coverage-100%25-brightgreen.svg)
 ![Typing](https://img.shields.io/badge/Typing-Strict-blue.svg)
 
-`c-linter` is a specialized command-line tool and Python SDK designed to strictly enforce rigid C coding standards using the `libclang` AST (Abstract Syntax Tree).
+`c-linter` is a specialized command-line tool and Python SDK designed to strictly enforce rigid C coding standards using the `libclang` AST (Abstract Syntax Tree). 
 
 Rather than relying on fragile regex matching, this tool actually parses the code to guarantee 100% accurate structural enforcement. It is ideal for usage in strict CI environments or as a pre-commit hook.
 
+For a deep dive into how the tool is built and structured, please see the [Architecture Documentation](ARCHITECTURE.md).
+
+## Why an AST Linter?
+
+Traditional linters often rely on Regular Expressions (Regex) to grep for banned patterns. This approach is fundamentally flawed for C because it ignores scope, macros, and comments. A regex looking for `malloc` might trigger on a variable named `malloc_counter` or fail if the allocation is hidden behind a `#define`. 
+
+By hooking directly into `libclang`, `c-linter` "sees" the code exactly as the compiler does. It resolves types, follows preprocessor macros, and understands the syntax tree natively, ensuring zero false positives from string matching.
+
+---
+
 ## Enforced Standards
 
-1.  **Strict C89 Compliance:**
-    *   The linter enforces `-std=c89 -pedantic`. Features like mixing declarations and code, `//` comments, or `for (int i...)` will immediately fail the lint process.
-2.  **Return Type strictness:**
-    *   Functions cannot return arbitrary `structs` or `pointers`.
-    *   All user-defined function returns must evaluate to `int`, an `enum`, `void`, or a fundamental math type (`float`, `double`). This ensures that complex state passes via pointer arguments and failure states map cleanly to integral statuses.
-3.  **Mandatory Allocation Checking:**
-    *   The AST is searched for allocations (`malloc`, `calloc`, `realloc`). Any resulting pointer must be explicitly checked against `NULL` (or `!p`) within the same lexical scope before it is used or returned.
-4.  **Nodiscard Enforcement:**
-    *   Any call to a function that evaluates to an `int` must have its return value evaluated or assigned. It cannot be used in a discarded expression statement, unless explicitly cast to `(void)`.
-5.  **Safe CRT Enforcement:**
-    *   Usage of unsafe standard C library functions (like `fopen`, `strcpy`, `sprintf`) are banned. The linter suggests the `_s` alternative (e.g. `fopen_s`).
-    *   **Exemption:** You can safely fall back to the unsafe function if it is guarded behind an `#else` block mapping to `#ifdef __STDC_WANT_LIB_EXT1__` or standard Windows macros.
-6.  **Windows Format Literals:**
-    *   Using size and pointer format specifiers like `%zu`, `%I64d`, or `%Iu` are flagged unless the line is strictly wrapped in an `#ifdef` block for Windows (e.g., `WIN32`, `_MSC_VER`, `__CYGWIN__`, `__MINGW64__`).
+### 1. Strict C89 Compliance
+The linter enforces `-std=c89 -pedantic`. Features like mixing declarations and code, `//` comments, or `for (int i...)` will immediately fail the lint process.
+
+* **Bad:**
+  ```c
+  int i = 0;
+  // This is a C99 comment
+  for (int j = 0; j < 10; j++) { ... } /* C99 inline declaration */
+  ```
+* **Good:**
+  ```c
+  int i = 0;
+  int j;
+  /* This is a C89 compliant comment */
+  for (j = 0; j < 10; j++) { ... }
+  ```
+
+### 2. Return Type Strictness
+Functions cannot return arbitrary `structs` or `pointers`. All user-defined function returns must evaluate to `int`, an `enum`, `void`, or a fundamental math type (`float`, `double`). This ensures that complex state passes via pointer arguments, and failure states map cleanly to integral statuses.
+
+* **Bad:**
+  ```c
+  struct Buffer create_buffer(void); /* Error: Returning a complex struct */
+  ```
+* **Good:**
+  ```c
+  int create_buffer(struct Buffer* out_buffer); /* Pass by pointer, return status */
+  ```
+
+### 3. Mandatory Allocation Checking
+The AST is searched for allocations (`malloc`, `calloc`, `realloc`). Any resulting pointer must be explicitly checked against `NULL` (or `!p`) within the same lexical scope before it is used or returned.
+
+* **Bad:**
+  ```c
+  char* data = (char*)malloc(10);
+  data[0] = 'a'; /* Error: Potential failure from allocation is not checked */
+  ```
+* **Good:**
+  ```c
+  char* data = (char*)malloc(10);
+  if (data == NULL) return -1;
+  data[0] = 'a';
+  ```
+
+### 4. Nodiscard Enforcement
+Any call to a function that evaluates to an `int` must have its return value evaluated or assigned. It cannot be used in a discarded expression statement, unless explicitly cast to `(void)`.
+
+* **Bad:**
+  ```c
+  init_system(); /* Error: Call to int-returning function is discarded */
+  ```
+* **Good:**
+  ```c
+  int status = init_system();
+  if (status != 0) return status;
+  
+  /* Or intentionally discard: */
+  (void)init_system();
+  ```
+
+### 5. Safe CRT Enforcement
+Usage of unsafe standard C library functions (like `fopen`, `strcpy`, `sprintf`) are banned. The linter suggests the `_s` alternative (e.g. `fopen_s`).
+
+* **Exemption:** You can safely fall back to the unsafe function if it is guarded behind an `#else` block mapping to `#ifdef __STDC_WANT_LIB_EXT1__` or standard Windows macros.
+
+* **Bad:**
+  ```c
+  FILE* f = fopen("file.txt", "w"); /* Error: Use safe CRT alternative */
+  ```
+* **Good:**
+  ```c
+  FILE* f;
+  fopen_s(&f, "file.txt", "w");
+  ```
+
+### 6. Windows Format Literals
+Using size and pointer format specifiers like `%zu`, `%I64d`, or `%Iu` are flagged unless the line is strictly wrapped in an `#ifdef` block for Windows (e.g., `WIN32`, `_MSC_VER`, `__CYGWIN__`, `__MINGW64__`).
+
+* **Bad:**
+  ```c
+  printf("Size: %I64d\n", size); /* Error: Format specifier used without Windows guard */
+  ```
+* **Good:**
+  ```c
+  #ifdef _WIN32
+      printf("Size: %I64d\n", size);
+  #endif
+  ```
+
+---
+
+## Build System Integration
+
+To provide 100% accurate analysis, `c-linter` can read from your build system's `compile_commands.json` to extract precise include paths, compiler flags, and `#define` macros used to build your project.
+
+You can specify the path using `-p / --build-dir`, but by default, `c-linter` will auto-discover the file if it exists in `./build`, `./out`, or the project root.
+
+**Header-Only Strategy:** 
+Linting standalone `.h` files often fails because they rely on types defined in a `.c` file that includes them. `c-linter` uses a "header-only strategy" to automatically inject standard types (like `size_t` or `uint32_t`) when linting headers, preventing cascading "unknown type name" errors.
+
+---
 
 ## Installation
 
@@ -91,23 +188,32 @@ c-linter src/ include/
 
 ### CLI Flags
 
+**Rule Configuration**
+*   `--std STD`: C standard version (e.g., c89, c99, c11).
 *   `--no-windows`: Disables the Windows format literal guard checks.
 *   `--no-safe-crt`: Disables Safe CRT function replacement checks.
 *   `--strict-safe-crt`: Enable strict Safe CRT enforcement (flags strncpy and strncat).
-*   `-I INCLUDE, --include INCLUDE`: Add directory to include search path. (Note: The linter automatically detects and includes `include/` and `src/` directories if they exist in the target path).
-*   `--ignore-returns IGNORE_RETURNS`: Comma-separated list of functions or macros to ignore discarded returns for.
-*   `--std STD`: C standard version (e.g., c89, c99, c11).
-*   `-p BUILD_DIR, --build-dir BUILD_DIR`: Path to build directory containing `compile_commands.json` (auto-discovered if omitted).
-*   `--max-issues-per-file`: Maximum number of compiler diagnostics to report per file (default: 50). Set to 0 to disable.
-*   `--exclude EXCLUDE`: Glob pattern to exclude files/directories.
+*   `--no-discarded-returns`: Disable the discarded return value check globally.
 *   `--no-tolerate-c99`: Do not tolerate C99 type extensions (like `_Bool` or `long long`) in C89 mode.
-*   `--no-header-strategy`: Disable auto-injection of standard headers when linting standalone `.h` files.
-*   `--ignore-missing-includes`: Suppress 'file not found' diagnostics.
 *   `--no-test-relaxations`: Disable relaxed rules for test files.
 *   `--freestanding`: Enforce a freestanding environment (disables built-in headers).
-*   `--fix`: Automatically fix trivial warnings (e.g., missing newlines at EOF).
+
+**Build & Environment**
+*   `-I INCLUDE, --include INCLUDE`: Add directory to include search path. (Note: The linter automatically detects and includes `include/` and `src/` directories if they exist in the target path).
+*   `-p BUILD_DIR, --build-dir BUILD_DIR`: Path to build directory containing `compile_commands.json` (auto-discovered if omitted).
+*   `--no-header-strategy`: Disable auto-injection of standard headers when linting standalone `.h` files.
+
+**Exclusions & Suppressions**
+*   `--exclude EXCLUDE`: Glob pattern to exclude files/directories.
+*   `--safe-crt-exclude`: Glob pattern to exclude files/directories from Safe CRT checks.
+*   `--ignore-returns IGNORE_RETURNS`: Comma-separated list of functions or macros to ignore discarded returns for.
+*   `--ignore-missing-includes`: Suppress 'file not found' diagnostics.
 *   `--no-pedantic`: Suppress standard compiler pedantic warnings like 'no newline at end of file'.
 *   `--ignore-formatting`: Alias for `--no-pedantic`.
+
+**Output & Actions**
+*   `--max-issues-per-file`: Maximum number of compiler diagnostics to report per file (default: 50). Set to 0 to disable.
+*   `--fix`: Automatically fix trivial warnings (e.g., missing newlines at EOF).
 
 ### Configuration Files
 
@@ -127,14 +233,6 @@ max_issues_per_file = 100
 [tool.c-linter]
 std = "c99"
 no_safe_crt = true
-```
-
-### Handling Discarded Returns
-
-If you intentionally want to discard the return value of an integer-returning function, the idiomatic way to bypass the linter without modifying your `--ignore-returns` list is to cast the function call to `(void)`:
-
-```c
-(void)do_something(); /* Return value intentionally discarded */
 ```
 
 ### Inline Ignore Comments

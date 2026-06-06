@@ -58,11 +58,13 @@ def test_cli_file_not_found(capsys):
 def test_auto_includes(tmp_path, capsys):
     p = tmp_path / "clean.c"
     p.write_text("int main(void) {\n    return 0;\n}\n")
+    h = tmp_path / "test.h"
+    h.write_text("int a;\n")
 
     def mock_isdir(path):
         return path in ("include", "src")
 
-    with patch.object(sys, "argv", ["c-linter", str(p)]):
+    with patch.object(sys, "argv", ["c-linter", str(p), str(h)]):
         with patch("os.path.isdir", side_effect=mock_isdir):
             with pytest.raises(SystemExit) as e:
                 main()
@@ -170,8 +172,7 @@ def test_load_config_pyproject_toml():
 def test_find_compile_commands(tmp_path):
     """Test finding compile_commands.json."""
     with patch("os.path.isfile", return_value=False):
-        assert _find_compile_commands() == ""
-
+        assert _find_compile_commands([]) == ""
 
 def test_cli_exclude_pattern_asterisks():
     from c_linter.cli import _match_exclude
@@ -185,7 +186,7 @@ def test_cli_exclude_pattern_asterisks():
         return path == os.path.join("build", "compile_commands.json")
 
     with patch("os.path.isfile", side_effect=mock_isfile):
-        assert _find_compile_commands() == "build"
+        assert _find_compile_commands([]) == "build"
 
 
 def test_match_exclude():
@@ -229,3 +230,31 @@ def test_gather_files(tmp_path):
     # Non-existent file
     files = _gather_files([str(tmp_path / "does_not_exist.c")], [])
     assert len(files) == 0
+
+def test_find_compile_commands_relative(tmp_path):
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "compile_commands.json").touch()
+    assert _find_compile_commands([str(tmp_path / "src" / "file.c")]) == str(tmp_path / "build")
+
+def test_cli_no_discarded_returns_and_safe_crt_exclude(tmp_path, capsys):
+    p = tmp_path / "bad.c"
+    p.write_text("#include <string.h>\n#include <stdio.h>\nint main(void) { char b[10]; strcpy(b, \"\"); printf(\"test\"); return 0; }\n")
+    (tmp_path / "include").mkdir()
+    (tmp_path / "include" / "test.h").touch()
+    
+    with patch.object(
+        sys,
+        "argv",
+        [
+            "c-linter",
+            str(p),
+            "--no-discarded-returns",
+            "--safe-crt-exclude",
+            "bad.c",
+            "-I",
+            str(tmp_path / "include"),
+        ],
+    ):
+        with pytest.raises(SystemExit) as e:
+            main()
+        assert e.value.code == 0
