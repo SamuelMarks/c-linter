@@ -6,10 +6,10 @@ import os
 from pathlib import Path
 from typing import List, Dict, Any
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ImportError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore
+else:  # pragma: no cover
+    import tomli as tomllib  # pragma: no cover
 
 from .linter import lint_file
 
