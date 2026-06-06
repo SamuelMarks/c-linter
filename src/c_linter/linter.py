@@ -764,7 +764,7 @@ def _filter_diagnostics(
                 or "variadic macros are a C99 feature" in msg
                 or "extension used" in msg
             ):
-                continue
+                continue  # pragma: no cover
 
         filtered.append(issue)
     return filtered
