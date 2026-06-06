@@ -624,7 +624,7 @@ def _check_allocations(tu_cursor: Cursor, filename: str, issues: List[Issue]) ->
             and cursor.type.get_canonical().kind == TypeKind.INT
         ):
             tokens = list(cursor.get_tokens())
-            if any(t.spelling in ("==", "!=", "<", "<=", ">", ">=") for t in tokens):
+            if not tokens or any(t.spelling in ("==", "!=", "<", "<=", ">", ">=") for t in tokens):
                 for child in cursor.get_children():
                     find_decl_refs(child)
 
